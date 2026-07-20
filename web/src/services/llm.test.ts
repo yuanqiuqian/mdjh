@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildChatCompletionsUrl, parseStoryResponse } from "@/services/llm";
+import {
+  buildChatCompletionsUrl,
+  extractNarrativePreview,
+  parseStoryResponse,
+} from "@/services/llm";
 
 describe("llm helpers", () => {
   it("buildChatCompletionsUrl normalizes base endpoint", () => {
@@ -33,5 +37,12 @@ describe("llm helpers", () => {
     expect(parsed.directives?.suggested_deltas?.exp_delta).toBe(0);
     expect(parsed.directives?.suggested_deltas?.money_delta).toBe(20);
   });
-});
 
+  it("extractNarrativePreview reads partial streamed narrative text", () => {
+    const partial =
+      '{"narrative":"雨声渐密，客栈外的灯火在风里摇晃\\n你按住剑柄，听见门外有马蹄';
+    expect(extractNarrativePreview(partial)).toBe(
+      "雨声渐密，客栈外的灯火在风里摇晃\n你按住剑柄，听见门外有马蹄",
+    );
+  });
+});

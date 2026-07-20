@@ -126,6 +126,21 @@ export type StoryResponse = {
   };
 };
 
+export type StoryDebugInfo = {
+  requestedAt: string;
+  userInput: string;
+  requestUrl: string;
+  requestBody: string;
+  transport: "json" | "sse";
+  fallbackUsed: boolean;
+  finishReason: string | null;
+  narrativePreview: string | null;
+  rawPayload: string | null;
+  rawContent: string | null;
+  parsedStory: StoryResponse | null;
+  errorMessage: string | null;
+};
+
 export type TrainingAction = {
   id: string;
   name: string;

@@ -1,10 +1,30 @@
 import type {
   LlmConfig,
   SaveSlot,
+  StoryDebugInfo,
   StoryResponse,
   ValidateLlmConfigInput,
   ValidateLlmConfigResult,
 } from "@/types/game";
+
+type StoryRequestError = Error & {
+  debugInfo?: StoryDebugInfo;
+};
+
+type StoryRequestPayload = {
+  model: string;
+  temperature: number;
+  max_tokens: number;
+  stream?: boolean;
+  messages: Array<{ role: "system" | "user"; content: string }>;
+};
+
+type StoryRequestProgress = {
+  rawContent: string;
+  rawPayload: string;
+  preview: string | null;
+  finishReason: string | null;
+};
 
 const classifyError = (status: number) => {
   if (status === 401 || status === 403) {
@@ -54,6 +74,28 @@ const getErrorText = async (response: Response) => {
   }
   return classifyError(response.status);
 };
+
+/**
+ * Builds the request payload shared by both standard and streaming story calls.
+ */
+const buildStoryRequestPayload = (
+  config: LlmConfig,
+  save: SaveSlot,
+  userInput: string,
+  stream: boolean,
+): StoryRequestPayload => ({
+  model: config.modelId,
+  temperature: 0.9,
+  max_tokens: 1200,
+  stream,
+  messages: [
+    { role: "system", content: storySystemPrompt },
+    {
+      role: "user",
+      content: JSON.stringify(buildContextPacket(save, userInput)),
+    },
+  ],
+});
 
 export const validateLlmConfig = async ({
   endpoint,
@@ -221,6 +263,42 @@ const extractContent = (payload: unknown) => {
   return "";
 };
 
+/**
+ * Extracts incremental text content from a streamed chat-completions chunk.
+ */
+const extractStreamDeltaContent = (payload: unknown) => {
+  const record = getRecord(payload);
+  const choices = Array.isArray(record?.choices) ? record.choices : [];
+  const firstChoice = getRecord(choices[0]);
+  const delta = getRecord(firstChoice?.delta);
+  const raw = delta?.content;
+
+  if (typeof raw === "string") {
+    return raw;
+  }
+
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item) => {
+        const node = getRecord(item);
+        return typeof node?.text === "string" ? node.text : "";
+      })
+      .join("");
+  }
+
+  return "";
+};
+
+/**
+ * Extracts the provider finish reason from a streamed chunk when available.
+ */
+const extractFinishReason = (payload: unknown) => {
+  const record = getRecord(payload);
+  const choices = Array.isArray(record?.choices) ? record.choices : [];
+  const firstChoice = getRecord(choices[0]);
+  return typeof firstChoice?.finish_reason === "string" ? firstChoice.finish_reason : null;
+};
+
 const extractJson = (content: string) => {
   const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenced?.[1]) {
@@ -232,6 +310,154 @@ const extractJson = (content: string) => {
     return content.slice(start, end + 1);
   }
   return content.trim();
+};
+
+/**
+ * Pulls a readable narrative preview from a partially streamed JSON string.
+ */
+export const extractNarrativePreview = (content: string) => {
+  const marker = '"narrative"';
+  const markerIndex = content.indexOf(marker);
+  if (markerIndex < 0) {
+    return "";
+  }
+
+  const colonIndex = content.indexOf(":", markerIndex + marker.length);
+  if (colonIndex < 0) {
+    return "";
+  }
+
+  const quoteIndex = content.indexOf('"', colonIndex);
+  if (quoteIndex < 0) {
+    return "";
+  }
+
+  let escaped = false;
+  let preview = "";
+
+  for (let index = quoteIndex + 1; index < content.length; index += 1) {
+    const char = content[index];
+    if (escaped) {
+      if (char === "n") {
+        preview += "\n";
+      } else if (char === "t") {
+        preview += "\t";
+      } else if (char === "r") {
+        preview += "\r";
+      } else {
+        preview += char;
+      }
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      break;
+    }
+    preview += char;
+  }
+
+  return preview.trim();
+};
+
+/**
+ * Consumes an SSE response body and emits incremental story content updates.
+ */
+const readSseStoryStream = async (
+  response: Response,
+  onProgress?: (progress: StoryRequestProgress) => void,
+) => {
+  if (!response.body) {
+    throw new Error("当前模型接口未提供可读取的流式响应。");
+  }
+
+  const decoder = new TextDecoder();
+  const reader = response.body.getReader();
+  const rawEvents: string[] = [];
+  let buffer = "";
+  let rawContent = "";
+  let done = false;
+  let finishReason: string | null = null;
+
+  const emitProgress = () => {
+    onProgress?.({
+      rawContent,
+      rawPayload: rawEvents.join("\n"),
+      preview: extractNarrativePreview(rawContent) || null,
+      finishReason,
+    });
+  };
+
+  const processBlock = (block: string) => {
+    const dataLines = block
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart());
+
+    if (dataLines.length === 0) {
+      return;
+    }
+
+    const data = dataLines.join("\n");
+    if (data === "[DONE]") {
+      done = true;
+      return;
+    }
+
+    rawEvents.push(data);
+
+    try {
+      const payload = JSON.parse(data) as unknown;
+      finishReason = extractFinishReason(payload) ?? finishReason;
+      const delta = extractStreamDeltaContent(payload);
+      if (delta) {
+        rawContent += delta;
+        emitProgress();
+      } else if (finishReason) {
+        emitProgress();
+      }
+    } catch {
+      rawContent += data;
+      emitProgress();
+    }
+  };
+
+  while (!done) {
+    const chunk = await reader.read();
+    if (chunk.done) {
+      break;
+    }
+
+    buffer += decoder.decode(chunk.value, { stream: true }).replace(/\r\n/g, "\n");
+
+    let separatorIndex = buffer.indexOf("\n\n");
+    while (separatorIndex >= 0) {
+      const block = buffer.slice(0, separatorIndex).trim();
+      buffer = buffer.slice(separatorIndex + 2);
+      if (block) {
+        processBlock(block);
+      }
+      if (done) {
+        break;
+      }
+      separatorIndex = buffer.indexOf("\n\n");
+    }
+  }
+
+  const tail = buffer.trim();
+  if (!done && tail) {
+    processBlock(tail);
+  }
+
+  return {
+    rawContent,
+    rawPayload: rawEvents.join("\n"),
+    preview: extractNarrativePreview(rawContent) || null,
+    finishReason,
+  };
 };
 
 const clampDelta = (value?: number) => {
@@ -295,37 +521,89 @@ export const parseStoryResponse = (content: string): StoryResponse => {
   };
 };
 
-export const requestStoryFromModel = async ({
+/**
+ * Performs a non-stream fallback request and returns the full extracted response text.
+ */
+const requestStoryFromModelAsJson = async ({
   config,
   save,
   userInput,
+  signal,
 }: {
   config: LlmConfig;
   save: SaveSlot;
   userInput: string;
-}): Promise<StoryResponse> => {
+  signal: AbortSignal;
+}) => {
+  const requestUrl = buildChatCompletionsUrl(config.endpoint);
+  const requestBody = JSON.stringify(buildStoryRequestPayload(config, save, userInput, false));
+  const response = await fetch(requestUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: requestBody,
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await getErrorText(response));
+  }
+
+  const payload = await response.json();
+  return {
+    requestBody,
+    rawPayload: JSON.stringify(payload, null, 2),
+    rawContent: extractContent(payload),
+  };
+};
+
+/**
+ * Requests the next story beat and supports SSE streaming previews when available.
+ */
+export const requestStoryFromModel = async ({
+  config,
+  save,
+  userInput,
+  onProgress,
+}: {
+  config: LlmConfig;
+  save: SaveSlot;
+  userInput: string;
+  onProgress?: (debug: StoryDebugInfo) => void;
+}): Promise<{ story: StoryResponse; debug: StoryDebugInfo }> => {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 20000);
+  const requestUrl = buildChatCompletionsUrl(config.endpoint);
+  const requestPayload = buildStoryRequestPayload(config, save, userInput, true);
+  const requestBody = JSON.stringify(requestPayload);
+  const createDebugInfo = (
+    overrides: Partial<StoryDebugInfo> = {},
+  ): StoryDebugInfo => ({
+    requestedAt: new Date().toISOString(),
+    userInput,
+    requestUrl,
+    requestBody,
+    transport: "sse",
+    fallbackUsed: false,
+    finishReason: null,
+    narrativePreview: null,
+    rawPayload: null,
+    rawContent: null,
+    parsedStory: null,
+    errorMessage: null,
+    ...overrides,
+  });
 
   try {
-    const response = await fetch(buildChatCompletionsUrl(config.endpoint), {
+    const response = await fetch(requestUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${config.apiKey}`,
       },
-      body: JSON.stringify({
-        model: config.modelId,
-        temperature: 0.9,
-        max_tokens: 800,
-        messages: [
-          { role: "system", content: storySystemPrompt },
-          {
-            role: "user",
-            content: JSON.stringify(buildContextPacket(save, userInput)),
-          },
-        ],
-      }),
+      body: requestBody,
       signal: controller.signal,
     });
 
@@ -335,12 +613,101 @@ export const requestStoryFromModel = async ({
       throw new Error(await getErrorText(response));
     }
 
-    const payload = await response.json();
-    const content = extractContent(payload);
-    if (!content.trim()) {
-      throw new Error("模型返回为空，无法生成剧情。");
+    let transport: StoryDebugInfo["transport"] = "json";
+    let rawPayload: string | null = null;
+    let content = "";
+    let preview: string | null = null;
+    let finishReason: string | null = null;
+    let fallbackUsed = false;
+
+    const contentType = response.headers.get("content-type") ?? "";
+
+    if (response.body && contentType.includes("text/event-stream")) {
+      transport = "sse";
+      const streamResult = await readSseStoryStream(response, (progress) => {
+        onProgress?.(
+          createDebugInfo({
+            transport: "sse",
+            fallbackUsed: false,
+            finishReason: progress.finishReason,
+            narrativePreview: progress.preview,
+            rawPayload: progress.rawPayload,
+            rawContent: progress.rawContent,
+          }),
+        );
+      });
+      content = streamResult.rawContent;
+      rawPayload = streamResult.rawPayload;
+      preview = streamResult.preview;
+      finishReason = streamResult.finishReason;
+    } else {
+      const payload = await response.json();
+      content = extractContent(payload);
+      rawPayload = JSON.stringify(payload, null, 2);
+      preview = extractNarrativePreview(content) || null;
     }
-    return parseStoryResponse(content);
+
+    if (!content.trim()) {
+      const error = new Error("模型返回为空，无法生成剧情。") as StoryRequestError;
+      error.debugInfo = createDebugInfo({
+        transport,
+        narrativePreview: preview,
+        rawPayload,
+        rawContent: content,
+        errorMessage: "模型返回为空，无法生成剧情。",
+      });
+      throw error;
+    }
+    let story: StoryResponse;
+    try {
+      story = parseStoryResponse(content);
+    } catch (error) {
+      if (transport === "sse") {
+        const fallback = await requestStoryFromModelAsJson({
+          config,
+          save,
+          userInput,
+          signal: controller.signal,
+        });
+        content = fallback.rawContent;
+        rawPayload = [
+          rawPayload ? `SSE events:\n${rawPayload}` : null,
+          `Fallback JSON payload:\n${fallback.rawPayload}`,
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+        preview = extractNarrativePreview(content) || preview;
+        fallbackUsed = true;
+        story = parseStoryResponse(content);
+      } else {
+      const message =
+        error instanceof Error ? error.message : "模型返回格式异常，无法解析剧情。";
+      const parseError = new Error(message) as StoryRequestError;
+      parseError.debugInfo = createDebugInfo({
+        transport,
+        fallbackUsed,
+        finishReason,
+        narrativePreview: preview,
+        rawPayload,
+        rawContent: content,
+        errorMessage: message,
+      });
+      throw parseError;
+      }
+    }
+    return {
+      story,
+      debug: createDebugInfo({
+        transport,
+        fallbackUsed,
+        finishReason,
+        narrativePreview: preview ?? story.narrative,
+        rawPayload,
+        rawContent: content,
+        parsedStory: story,
+        errorMessage: null,
+      }),
+    };
   } catch (error) {
     window.clearTimeout(timeoutId);
     if (error instanceof Error) {

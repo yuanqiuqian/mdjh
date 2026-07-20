@@ -10,6 +10,9 @@ type AppFrameProps = {
   className?: string;
 };
 
+/**
+ * Provides the shared application shell with a compact desktop header.
+ */
 export function AppFrame({
   title,
   subtitle,
@@ -26,16 +29,18 @@ export function AppFrame({
         <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.02),transparent_30%,rgba(255,255,255,0.03))]" />
       </div>
 
-      <div className="relative mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 pb-28 pt-6 sm:px-6">
-        <header className="mb-6 flex items-start justify-between gap-4">
+      <div className="relative mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 pb-28 pt-5 sm:px-6 xl:px-8 xl:pt-4">
+        <header className="mb-5 flex items-start justify-between gap-4 xl:mb-4 xl:items-end xl:gap-3">
           <div className="space-y-2">
             <p className="text-[11px] uppercase tracking-[0.42em] text-amber-300/70">
               名动江湖
             </p>
-            <h1 className="font-serif text-[28px] leading-tight text-stone-50 sm:text-[34px]">
+            <h1 className="font-serif text-[28px] leading-tight text-stone-50 sm:text-[34px] xl:text-[32px]">
               {title}
             </h1>
-            <p className="max-w-2xl text-sm leading-6 text-stone-400">{subtitle}</p>
+            <p className="max-w-3xl text-sm leading-6 text-stone-400 xl:leading-5">
+              {subtitle}
+            </p>
           </div>
           {actions ? <div className="shrink-0">{actions}</div> : null}
         </header>
@@ -47,4 +52,3 @@ export function AppFrame({
     </div>
   );
 }
-

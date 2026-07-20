@@ -10,7 +10,7 @@ import {
   putSaveEntry,
 } from "@/services/db";
 import { requestStoryFromModel } from "@/services/llm";
-import type { LlmConfig, SaveEntry, SaveSlot } from "@/types/game";
+import type { LlmConfig, SaveEntry, SaveSlot, StoryDebugInfo } from "@/types/game";
 
 const createInitialEntries = (): SaveEntry[] => [
   { id: "active", kind: "active", label: "当前进度", data: null },
@@ -35,12 +35,16 @@ type AppState = {
   llmConfig: LlmConfig | null;
   validation: ValidationState;
   isGenerating: boolean;
+  debugMode: boolean;
+  currentStoryRequest: string | null;
+  lastStoryDebug: StoryDebugInfo | null;
   lastStoryError: string | null;
   saveEntries: SaveEntry[];
   activeSave: SaveSlot | null;
   currentPanel: "overview" | "character" | "inventory" | "relations" | "logs";
   setCurrentPanel: (panel: AppState["currentPanel"]) => void;
   setOnline: (isOnline: boolean) => void;
+  setDebugMode: (enabled: boolean) => void;
   hydrate: () => Promise<void>;
   setValidation: (validation: ValidationState) => void;
   saveLlmConfig: (config: LlmConfig) => Promise<void>;
@@ -64,12 +68,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   llmConfig: null,
   validation: { status: "idle", message: "尚未测试模型连接。" },
   isGenerating: false,
+  debugMode: false,
+  currentStoryRequest: null,
+  lastStoryDebug: null,
   lastStoryError: null,
   saveEntries: createInitialEntries(),
   activeSave: null,
   currentPanel: "overview",
   setCurrentPanel: (panel) => set({ currentPanel: panel }),
   setOnline: (isOnline) => set({ isOnline }),
+  setDebugMode: (debugMode) => set({ debugMode }),
   hydrate: async () => {
     const [savedConfig, savedEntries] = await Promise.all([
       getLlmConfig(),
@@ -94,6 +102,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         : { status: "idle", message: "尚未测试模型连接。" },
       saveEntries: merged,
       activeSave: active,
+      currentStoryRequest: null,
       lastStoryError: null,
     });
   },
@@ -111,6 +120,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       llmConfig: null,
       validation: { status: "idle", message: "模型配置已清除。" },
+      currentStoryRequest: null,
+      lastStoryDebug: null,
       lastStoryError: null,
     });
   },
@@ -127,6 +138,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeSave: save,
       saveEntries: nextEntries,
       currentPanel: "overview",
+      currentStoryRequest: null,
+      lastStoryDebug: null,
       lastStoryError: null,
     });
   },
@@ -150,6 +163,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       activeSave: updated,
       saveEntries: nextEntries,
+      currentStoryRequest: null,
       lastStoryError: null,
     });
   },
@@ -194,13 +208,34 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
 
-    set({ isGenerating: true, lastStoryError: null });
+    set({
+      isGenerating: true,
+      currentStoryRequest: trimmed,
+      lastStoryError: null,
+      lastStoryDebug: {
+        requestedAt: new Date().toISOString(),
+        userInput: trimmed,
+        requestUrl: "",
+        requestBody: "",
+        transport: "sse",
+        fallbackUsed: false,
+        finishReason: null,
+        narrativePreview: null,
+        rawPayload: null,
+        rawContent: null,
+        parsedStory: null,
+        errorMessage: null,
+      },
+    });
 
     try {
-      const story = await requestStoryFromModel({
+      const { story, debug } = await requestStoryFromModel({
         config: state.llmConfig,
         save: state.activeSave,
         userInput: trimmed,
+        onProgress: (progressDebug) => {
+          set({ lastStoryDebug: progressDebug });
+        },
       });
       const updated = applyStoryResponse(state.activeSave, trimmed, story);
       const nextEntries = state.saveEntries.map((entry) => {
@@ -214,13 +249,37 @@ export const useAppStore = create<AppState>((set, get) => ({
         activeSave: updated,
         saveEntries: nextEntries,
         isGenerating: false,
+        currentStoryRequest: null,
+        lastStoryDebug: debug,
         lastStoryError: null,
       });
     } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "剧情请求失败，请稍后重试。";
+      const debugInfo =
+        error instanceof Error && "debugInfo" in error
+          ? (error.debugInfo as StoryDebugInfo | undefined)
+          : undefined;
       set({
         isGenerating: false,
-        lastStoryError:
-          error instanceof Error ? error.message : "剧情请求失败，请稍后重试。",
+        currentStoryRequest: null,
+        lastStoryDebug:
+          debugInfo ??
+          {
+            requestedAt: new Date().toISOString(),
+            userInput: trimmed,
+            requestUrl: state.llmConfig.endpoint,
+            requestBody: "",
+            transport: "json",
+            fallbackUsed: false,
+            finishReason: null,
+            narrativePreview: null,
+            rawPayload: null,
+            rawContent: null,
+            parsedStory: null,
+            errorMessage: message,
+          },
+        lastStoryError: message,
       });
     }
   },
@@ -269,4 +328,3 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ saveEntries: nextEntries });
   },
 }));
-
