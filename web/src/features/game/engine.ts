@@ -192,12 +192,122 @@ const summarizeCombatLogs = (logs: CombatState["logs"]) =>
     .map((log) => log.summary)
     .join(" ");
 
+const buildCombatLoot = (combat: CombatState, result: "victory" | "defeat" | "fled") => {
+  if (result !== "victory") {
+    return {
+      money: 0,
+      items: [] as InventoryItem[],
+      summary: result === "fled" ? "仓促脱身，未能搜刮战利品。" : "你败下阵来，没能保住这次交锋中的收益。",
+    };
+  }
+
+  const boss = combat.enemies.find((enemy) => enemy.isBoss);
+  const money = boss ? 18 : 10;
+  const items: InventoryItem[] = [];
+
+  if (boss) {
+    items.push({
+      id: makeId("loot"),
+      name: "山寨腰牌",
+      type: "任务物",
+      description: "刻着山寨印记的腰牌，也许能指向这伙山贼的来路。",
+    });
+  }
+
+  if (combat.enemies.some((enemy) => enemy.name.includes("山贼"))) {
+    items.push({
+      id: makeId("loot"),
+      name: "止血散",
+      type: "消耗品",
+      description: "从山贼身上搜出的粗制药散，能在紧急时稍作疗伤。",
+    });
+  }
+
+  const rewardText = [
+    money > 0 ? `拾得碎银 ${money} 两` : null,
+    items.length > 0 ? `获得${items.map((item) => item.name).join("、")}` : null,
+  ]
+    .filter(Boolean)
+    .join("，");
+
+  return {
+    money,
+    items,
+    summary: rewardText || "战局已定，但未搜到额外收获。",
+  };
+};
+
+const updateCombatRelations = (
+  relations: SaveSlot["relations"],
+  combat: CombatState,
+  result: "victory" | "defeat" | "fled",
+) =>
+  relations.map((relation) => {
+    const enemy = combat.enemies.find((item) => item.id === relation.id);
+    if (enemy) {
+      if (result === "victory") {
+        return {
+          ...relation,
+          favor: enemy.isBoss ? -100 : Math.max(-100, relation.favor - 30),
+          note: enemy.isBoss
+            ? "你在正面交锋中击溃了他，仇恨已深到无法化解。"
+            : "对方在这场败局后对你又惧又恨。",
+        };
+      }
+      if (result === "fled") {
+        return {
+          ...relation,
+          favor: Math.max(-100, relation.favor - 12),
+          note: "你虽成功脱身，但这场冲突并未真正了结。",
+        };
+      }
+      return {
+        ...relation,
+        favor: Math.max(-100, relation.favor - 18),
+        note: "你在这场冲突里吃了亏，对方气焰更盛。",
+      };
+    }
+
+    if (combat.allies.some((item) => item.id === relation.id)) {
+      return {
+        ...relation,
+        favor: result === "victory" ? Math.min(100, relation.favor + 15) : relation.favor,
+        note: result === "victory" ? "并肩作战后，对方对你的观感明显改善。" : relation.note,
+      };
+    }
+
+    if (relation.id === "npc-passenger") {
+      if (result === "victory") {
+        return {
+          ...relation,
+          favor: Math.min(100, relation.favor + 20),
+          note: "你出手击退山贼后，对方对你感激不尽。",
+        };
+      }
+      if (result === "fled") {
+        return {
+          ...relation,
+          favor: Math.max(-100, relation.favor - 6),
+          note: "你选择先保全自身，对方难免心生复杂情绪。",
+        };
+      }
+      return {
+        ...relation,
+        favor: Math.max(-100, relation.favor - 15),
+        note: "你在乱战中失手，对方对你的信任大幅下降。",
+      };
+    }
+
+    return relation;
+  });
+
 const finalizeCombat = (
   save: SaveSlot,
   combat: CombatState,
   result: "victory" | "defeat" | "fled",
 ): SaveSlot => {
   const player = { ...combat.player, status: {} };
+  const loot = buildCombatLoot(combat, result);
   let updated: SaveSlot = syncPlayerStats(save, player);
   const latestEnemyName = combat.enemies.find((enemy) => enemy.isBoss)?.name ?? combat.enemies[0]?.name ?? "敌人";
   const summary =
@@ -219,10 +329,11 @@ const finalizeCombat = (
     sceneType: "combat",
     title: `战斗结算：${combat.title}`,
     narrative: combat.introNarrative,
-    outcome: `${summary} ${summarizeCombatLogs(combat.logs)}`.trim(),
+    outcome: `${summary} ${loot.summary} ${summarizeCombatLogs(combat.logs)}`.trim(),
     deltas: {
       hp: player.hp - save.player.stats.hp,
       mp: player.mp - save.player.stats.mp,
+      money: loot.money,
     },
   };
 
@@ -231,29 +342,18 @@ const finalizeCombat = (
     updatedAt: new Date().toISOString(),
     gameMode: "dialogue",
     combatState: null,
+    inventory: [...updated.inventory, ...loot.items],
+    player: {
+      ...updated.player,
+      money: clamp(updated.player.money + loot.money, 0, 999999),
+    },
     recentEvents: [event, ...updated.recentEvents].slice(0, 50),
     longSummary: [
       ...updated.longSummary,
-      `${new Date().toLocaleString("zh-CN")}：${summary}`,
+      `${new Date().toLocaleString("zh-CN")}：${summary}${loot.summary ? ` ${loot.summary}` : ""}`,
     ].slice(-12),
     suggestedActions: nextActions,
-    relations: updated.relations.map((relation) => {
-      if (combat.enemies.some((enemy) => enemy.id === relation.id)) {
-        return {
-          ...relation,
-          favor: result === "victory" ? -100 : result === "fled" ? relation.favor - 10 : relation.favor - 20,
-          note: result === "victory" ? "你在战斗中彻底压制了对方。" : "战斗后的敌意进一步加深。",
-        };
-      }
-      if (relation.id === "npc-passenger" && result === "victory") {
-        return {
-          ...relation,
-          favor: relation.favor + 20,
-          note: "你出手击退山贼后，对方对你感激不尽。",
-        };
-      }
-      return relation;
-    }),
+    relations: updateCombatRelations(updated.relations, combat, result),
   };
 
   return updated;
@@ -716,11 +816,13 @@ export const buildCombatFollowupPrompt = (
   const player = save.player;
   const resultLabel =
     result === "victory" ? "我方获胜" : result === "defeat" ? "我方落败" : "我方成功脱离";
+  const latestLoot = combatEvent?.outcome.match(/获得[^。]+|拾得碎银\s*\d+\s*两/g)?.join("，") ?? "暂无额外战利品";
 
   return [
     "交战已经结束，请直接续写战后剧情，不要重新描写同一场战斗的出招过程。",
     `战斗结果：${resultLabel}。`,
     `战斗摘要：${combatEvent?.outcome ?? "战斗已经收束。"}`,
+    `本次收获：${latestLoot}。`,
     `当前状态：HP ${player.stats.hp}/${player.stats.hpMax}，MP ${player.stats.mp}/${player.stats.mpMax}，银两 ${player.money}。`,
     "请重点描写现场反应、敌我关系变化、掉落/线索/后续选择，并给出新的对话模式选项。",
   ].join("\n");

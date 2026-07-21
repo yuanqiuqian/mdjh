@@ -52,6 +52,8 @@ describe("game engine", () => {
 
   it("can enter combat mode and resolve an action", () => {
     const save = createNewSave("mingjiao");
+    const moneyBefore = save.player.money;
+    const inventoryCount = save.inventory.length;
     const setup: CombatSetupResponse = {
       title: "山道恶斗",
       objective: "击退山贼",
@@ -87,6 +89,8 @@ describe("game engine", () => {
     });
 
     expect(resolved.updatedSave.player.stats.hp).toBeGreaterThanOrEqual(0);
+    expect(resolved.updatedSave.player.money).toBeGreaterThanOrEqual(moneyBefore);
+    expect(resolved.updatedSave.inventory.length).toBeGreaterThanOrEqual(inventoryCount);
     expect(resolved.updatedSave.recentEvents.length).toBeGreaterThan(0);
   });
 
@@ -125,5 +129,6 @@ describe("game engine", () => {
     const prompt = buildCombatFollowupPrompt(resolved.updatedSave, "victory");
     expect(prompt).toContain("交战已经结束");
     expect(prompt).toContain("我方获胜");
+    expect(prompt).toContain("本次收获");
   });
 });
