@@ -8,12 +8,16 @@ AI负责：
 - 生成可交互的选项（按钮/建议输入）
 - 生成或引入新角色（NPC）及其初始属性/技能/阵营/关系
 - 给出结构化的“状态变化建议”（由系统最终校验并落盘）
+- 判断当前回合是否应从对话模式切换到交战模式
+- 在交战开始前生成敌我战斗初始化数据
+- 在交战结束后根据战报摘要续写战后剧情
 
 系统负责：
 
 - 规则强校验（死亡、药物救助、属性下限/上限、物品数量、金钱不为负等）
 - 结算与存档写入
 - 上下文窗口管理与压缩
+- 交战模式下的本地回合制战斗结算
 
 ## 2. 事件记录系统（结构化日志）
 
@@ -83,6 +87,7 @@ LongSummary建议存两份：
 - relations：这些NPC对主角的favor与关系备注
 - long_summary：model_context_summary
 - recent_events：RecentLog（详细）
+- active_combat：若处于交战模式，则包含战斗标题、目标、回合数、在场敌人、最近战斗日志
 - current_prompt：本次玩家输入/本次想要触发的动作
 
 ### 4.1 “关联角色”筛选（建议）
@@ -102,10 +107,13 @@ LongSummary建议存两份：
 
 directives建议字段：
 
+- scene_type：dialogue / combat
 - next_options：给玩家的选项数组（每项含 label、hint、risk 可选）
 - new_characters：新角色数组（若无则为空）
 - suggested_deltas：建议状态变化（由系统校验）
 - hooks：为下一幕埋点（地点、任务线索、冲突点）
+- mode_transition：是否切换模式（如 dialogue -> combat）
+- combat_hint：战斗标题、目标、是否允许逃跑等提示
 
 系统校验点（建议）：
 
@@ -121,6 +129,7 @@ directives建议字段：
 - 你必须遵守硬规则与输出协议
 - 你必须在叙事中体现角色性格与关系变化
 - 你必须给出可执行的结构化指令（directives）
+- 当玩家有明确攻击/击杀/拔刀/追击意图且局势合理时，应尽快切换到交战模式，而不是长时间维持空转对话
 
 ### 6.2 用户指令骨架（拼装ContextPacket）
 
@@ -138,10 +147,30 @@ directives建议字段：
 
 - narrative: string
 - directives:
+  - scene_type: "dialogue" | "combat"
   - next_options: [{ label, hint }]
   - new_characters: [{ id, name, faction, type, level, stats, skills, initial_favor }]
   - suggested_deltas: { hp_delta, mp_delta, exp_delta, money_delta, items_delta, favor_delta, flags_delta }
   - hooks: string[]
+  - mode_transition: { to, reason }
+  - combat_hint: { title, objective, can_flee }
+
+### 6.3 交战初始化协议（新增）
+
+当AI决定切入交战模式时，系统会再发起一次“战斗初始化请求”，要求AI返回：
+
+- title：战斗标题
+- objective：战斗目标
+- introNarrative：开战前的短叙事
+- canFlee：是否允许逃跑
+- enemies：敌方角色数组（名称、等级、HP/MP、ATK/ARM/ASPD、技能）
+- allies：我方临时盟友数组（可为空）
+
+说明：
+
+- 战斗初始化只发生在切入交战模式时
+- 进入交战后，普通出招不再逐回合请求AI
+- 战斗结束后，由系统把战报摘要回灌给AI继续写剧情
 
 ## 7. 质量与安全约束（叙事一致性）
 
@@ -149,4 +178,3 @@ directives建议字段：
 - 禁止无缘由的强行成功/失败：关键结果需与属性、选择、局势相关
 - 保持可玩性：每轮至少提供1条推进剧情的选择（除结局）
 - 保护玩家隐私：不要求玩家提供真实姓名、电话等信息
-
