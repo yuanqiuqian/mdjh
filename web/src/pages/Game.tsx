@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AppFrame } from "@/components/layout/AppFrame";
 import { SectionCard } from "@/components/ui/SectionCard";
@@ -6,8 +6,29 @@ import { trainingActions } from "@/data/game-data";
 import { formatDateTime, formatDelta } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/useAppStore";
+import type { CombatRoundLog } from "@/types/game";
 
 const TYPEWRITER_INTERVAL_MS = 18;
+const COMBAT_LOG_REVEAL_INTERVAL_MS = 480;
+
+const groupCombatLogs = (logs: CombatRoundLog[]) => {
+  const rounds = new Map<number, CombatRoundLog[]>();
+  for (const log of logs) {
+    const current = rounds.get(log.round) ?? [];
+    current.push(log);
+    rounds.set(log.round, current);
+  }
+  return Array.from(rounds.entries())
+    .sort((a, b) => b[0] - a[0])
+    .map(([round, items]) => ({ round, items }));
+};
+
+const getCombatStepLabel = (log?: CombatRoundLog) => {
+  if (!log) {
+    return "等待你的指令";
+  }
+  return log.actorId === "player" ? "你的回合已出手" : "敌方正在应对";
+};
 
 /**
  * Renders the main in-run game screen with a denser desktop-first layout.
@@ -32,6 +53,11 @@ export default function Game() {
   const [input, setInput] = useState("");
   const [combatTargetId, setCombatTargetId] = useState("");
   const [typedPreview, setTypedPreview] = useState("");
+  const [revealedCombatLogCount, setRevealedCombatLogCount] = useState(0);
+  const [isCombatAnimating, setIsCombatAnimating] = useState(false);
+  const [combatBeatText, setCombatBeatText] = useState("等待你的指令");
+  const revealTimerRef = useRef<number | null>(null);
+  const revealedLogCountRef = useRef(0);
 
   const configReady =
     Boolean(llmConfig?.lastValidatedAt) && validation.status === "success";
@@ -61,6 +87,12 @@ export default function Game() {
     : latest?.narrative ?? "你踏上古道，风声穿林，等待下一次抉择。";
   const echoTitle = isGenerating ? "AI 正在书写此回合" : latest?.title ?? "尚无回合";
   const combatHeadline = combat?.logs.at(-1)?.summary ?? combat?.introNarrative ?? "";
+  const visibleCombatLogs = useMemo(
+    () => (combat ? combat.logs.slice(0, revealedCombatLogCount) : []),
+    [combat, revealedCombatLogCount],
+  );
+  const combatRounds = useMemo(() => groupCombatLogs(visibleCombatLogs), [visibleCombatLogs]);
+  const combatActionLocked = isCombatAnimating || isGenerating;
 
   useEffect(() => {
     if (!combat || livingEnemies.length === 0) {
@@ -71,6 +103,83 @@ export default function Game() {
       setCombatTargetId(livingEnemies[0]?.id ?? "");
     }
   }, [combat, combatTargetId, livingEnemies]);
+
+  useEffect(() => {
+    if (!combat) {
+      if (revealTimerRef.current) {
+        window.clearTimeout(revealTimerRef.current);
+      }
+      revealTimerRef.current = null;
+      revealedLogCountRef.current = 0;
+      setRevealedCombatLogCount(0);
+      setIsCombatAnimating(false);
+      setCombatBeatText("等待你的指令");
+      return;
+    }
+
+    if (combat.logs.length === 0) {
+      if (revealTimerRef.current) {
+        window.clearTimeout(revealTimerRef.current);
+      }
+      revealTimerRef.current = null;
+      revealedLogCountRef.current = 0;
+      setRevealedCombatLogCount(0);
+      setIsCombatAnimating(false);
+      setCombatBeatText(combat.introNarrative);
+      return;
+    }
+
+    if (combat.logs.length < revealedLogCountRef.current) {
+      revealedLogCountRef.current = combat.logs.length;
+      setRevealedCombatLogCount(combat.logs.length);
+      setIsCombatAnimating(false);
+      setCombatBeatText(getCombatStepLabel(combat.logs.at(-1)));
+      return;
+    }
+
+    if (combat.logs.length === revealedLogCountRef.current) {
+      setCombatBeatText(getCombatStepLabel(combat.logs.at(-1)));
+      return;
+    }
+
+    setIsCombatAnimating(true);
+
+    const revealNext = () => {
+      const nextIndex = revealedLogCountRef.current;
+      const nextLog = combat.logs[nextIndex];
+      if (!nextLog) {
+        setIsCombatAnimating(false);
+        setCombatBeatText("等待你的指令");
+        revealTimerRef.current = null;
+        return;
+      }
+
+      const nextCount = nextIndex + 1;
+      revealedLogCountRef.current = nextCount;
+      setRevealedCombatLogCount(nextCount);
+      setCombatBeatText(`${getCombatStepLabel(nextLog)} · ${nextLog.summary}`);
+
+      if (nextCount < combat.logs.length) {
+        revealTimerRef.current = window.setTimeout(revealNext, COMBAT_LOG_REVEAL_INTERVAL_MS);
+        return;
+      }
+
+      revealTimerRef.current = window.setTimeout(() => {
+        setIsCombatAnimating(false);
+        setCombatBeatText("回合已结算，轮到你选择下一步");
+        revealTimerRef.current = null;
+      }, 240);
+    };
+
+    revealTimerRef.current = window.setTimeout(revealNext, 160);
+
+    return () => {
+      if (revealTimerRef.current) {
+        window.clearTimeout(revealTimerRef.current);
+        revealTimerRef.current = null;
+      }
+    };
+  }, [combat]);
 
   /**
    * Animates streamed preview text into a typewriter-style narrative.
@@ -146,115 +255,210 @@ export default function Game() {
     >
       {activeSave ? (
         activeSave.gameMode === "combat" && combat ? (
-          <div className="grid gap-3 xl:min-h-[calc(100vh-13rem)] xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.85fr)] xl:items-start">
+          <div className="grid gap-3 xl:min-h-[calc(100vh-13rem)] xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)] xl:items-start">
             <div className="grid gap-3">
               <SectionCard eyebrow="交战模式" title={`${combat.title} · 第 ${combat.round} 回合`}>
                 <div className="space-y-4">
                   <div className="rounded-[20px] border border-rose-300/20 bg-rose-400/5 px-4 py-3">
-                    <p className="text-xs text-rose-100/70">战斗目标</p>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs text-rose-100/70">战斗目标</p>
+                      <span
+                        className={cn(
+                          "rounded-full px-3 py-1 text-[11px]",
+                          isGenerating
+                            ? "bg-amber-300/10 text-amber-100"
+                            : isCombatAnimating
+                              ? "bg-cyan-300/10 text-cyan-100"
+                              : "bg-emerald-300/10 text-emerald-100",
+                        )}
+                      >
+                        {isGenerating
+                          ? "战后续写中"
+                          : isCombatAnimating
+                            ? "本回合结算中"
+                            : "轮到你行动"}
+                      </span>
+                    </div>
                     <p className="mt-2 text-sm leading-6 text-stone-100">{combat.objective}</p>
                     <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-stone-400">
                       {combatHeadline}
                     </p>
                   </div>
 
-                  <div className="grid gap-3 lg:grid-cols-2">
+                  <div className="rounded-[20px] border border-white/10 bg-white/5 px-4 py-3">
+                    <p className="text-[11px] uppercase tracking-[0.24em] text-stone-500">回合节奏</p>
+                    <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                      <div className="rounded-[16px] bg-amber-400/10 px-3 py-2 text-center text-amber-100">
+                        1. 你出手
+                      </div>
+                      <div
+                        className={cn(
+                          "rounded-[16px] px-3 py-2 text-center",
+                          isCombatAnimating
+                            ? "bg-cyan-400/10 text-cyan-100"
+                            : "bg-white/5 text-stone-500",
+                        )}
+                      >
+                        2. 敌方应对
+                      </div>
+                      <div
+                        className={cn(
+                          "rounded-[16px] px-3 py-2 text-center",
+                          !isCombatAnimating && !isGenerating
+                            ? "bg-emerald-400/10 text-emerald-100"
+                            : "bg-white/5 text-stone-500",
+                        )}
+                      >
+                        3. 下一回合
+                      </div>
+                    </div>
+                    <p className="mt-3 rounded-[16px] bg-black/20 px-3 py-2 text-xs leading-5 text-stone-300">
+                      {combatBeatText}
+                    </p>
+                  </div>
+
+                  <div className="grid gap-3 lg:grid-cols-[0.95fr_1.05fr]">
                     <div className="rounded-[20px] border border-emerald-300/20 bg-emerald-400/5 px-4 py-3">
                       <div className="flex items-center justify-between gap-3">
                         <p className="text-sm text-stone-100">{combat.player.name}</p>
                         <span className="text-xs text-stone-500">我方</span>
                       </div>
-                      <div className="mt-3 grid gap-2 text-xs text-stone-300">
-                        <div className="flex items-center justify-between">
-                          <span>HP</span>
-                          <span>{combat.player.hp}/{combat.player.hpMax}</span>
+                      <div className="mt-3 space-y-3 text-xs text-stone-300">
+                        <div>
+                          <div className="mb-1 flex items-center justify-between">
+                            <span>HP</span>
+                            <span>{combat.player.hp}/{combat.player.hpMax}</span>
+                          </div>
+                          <div className="h-2 rounded-full bg-black/30">
+                            <div
+                              className="h-2 rounded-full bg-rose-300/80 transition-all"
+                              style={{ width: `${(combat.player.hp / combat.player.hpMax) * 100}%` }}
+                            />
+                          </div>
                         </div>
-                        <div className="flex items-center justify-between">
-                          <span>MP</span>
-                          <span>{combat.player.mp}/{combat.player.mpMax}</span>
+                        <div>
+                          <div className="mb-1 flex items-center justify-between">
+                            <span>MP</span>
+                            <span>{combat.player.mp}/{combat.player.mpMax}</span>
+                          </div>
+                          <div className="h-2 rounded-full bg-black/30">
+                            <div
+                              className="h-2 rounded-full bg-cyan-300/80 transition-all"
+                              style={{ width: `${(combat.player.mp / Math.max(1, combat.player.mpMax)) * 100}%` }}
+                            />
+                          </div>
                         </div>
-                        <div className="flex items-center justify-between">
-                          <span>攻击 / 护甲</span>
-                          <span>{combat.player.atk} / {combat.player.arm}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span>攻速</span>
-                          <span>{combat.player.aspd}</span>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="rounded-[16px] bg-black/20 px-3 py-2">攻击 {combat.player.atk}</div>
+                          <div className="rounded-[16px] bg-black/20 px-3 py-2">护甲 {combat.player.arm}</div>
                         </div>
                       </div>
                     </div>
 
-                    <div className="grid gap-2">
-                      {livingEnemies.map((enemy) => (
-                        <button
-                          type="button"
-                          key={enemy.id}
-                          onClick={() => setCombatTargetId(enemy.id)}
-                          className={cn(
-                            "rounded-[18px] border px-4 py-3 text-left transition",
-                            combatTargetId === enemy.id
-                              ? "border-amber-300/40 bg-amber-400/10"
-                              : "border-white/10 bg-white/5 hover:bg-white/10",
-                          )}
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <p className="text-sm text-stone-100">{enemy.name}</p>
-                              <p className="mt-1 text-[11px] text-stone-500">
-                                {enemy.isBoss ? "首领" : "敌方"} · LV {enemy.level}
-                              </p>
+                    <div className="space-y-2">
+                      <p className="text-[11px] uppercase tracking-[0.24em] text-stone-500">选定目标</p>
+                      <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
+                        {livingEnemies.map((enemy) => (
+                          <button
+                            type="button"
+                            key={enemy.id}
+                            onClick={() => setCombatTargetId(enemy.id)}
+                            className={cn(
+                              "min-w-[180px] shrink-0 rounded-[18px] border px-4 py-3 text-left transition",
+                              combatTargetId === enemy.id
+                                ? "border-amber-300/40 bg-amber-400/10"
+                                : "border-white/10 bg-white/5 hover:bg-white/10",
+                            )}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="text-sm text-stone-100">{enemy.name}</p>
+                                <p className="mt-1 text-[11px] text-stone-500">
+                                  {enemy.isBoss ? "首领" : "敌方"} · LV {enemy.level}
+                                </p>
+                              </div>
+                              <span className="text-[11px] text-stone-500">
+                                {combatTargetId === enemy.id ? "已锁定" : "可选"}
+                              </span>
                             </div>
-                            <span className="text-xs text-stone-400">
-                              HP {enemy.hp}/{enemy.hpMax}
-                            </span>
-                          </div>
-                        </button>
-                      ))}
+                            <div className="mt-3">
+                              <div className="mb-1 flex items-center justify-between text-[11px] text-stone-400">
+                                <span>HP</span>
+                                <span>{enemy.hp}/{enemy.hpMax}</span>
+                              </div>
+                              <div className="h-2 rounded-full bg-black/30">
+                                <div
+                                  className="h-2 rounded-full bg-rose-300/80 transition-all"
+                                  style={{ width: `${(enemy.hp / enemy.hpMax) * 100}%` }}
+                                />
+                              </div>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 </div>
               </SectionCard>
 
-              <SectionCard eyebrow="回合操作" title="战斗指令">
-                <div className="grid gap-4 xl:grid-cols-2">
-                  <div className="grid gap-2">
+              <SectionCard eyebrow="回合操作" title="本回合指令">
+                <div className="grid gap-4">
+                  <div className="grid grid-cols-3 gap-2">
                     <button
                       type="button"
-                      disabled={livingEnemies.length === 0}
+                      disabled={livingEnemies.length === 0 || combatActionLocked}
                       onClick={() =>
                         performCombatAction({
                           type: "attack",
                           targetId: combatTargetId || livingEnemies[0]?.id || "",
                         })
                       }
-                      className="rounded-[18px] bg-amber-400/15 px-4 py-3 text-left text-sm text-amber-100 transition hover:bg-amber-400/25"
+                      className={cn(
+                        "rounded-[18px] px-4 py-3 text-sm transition",
+                        livingEnemies.length > 0 && !combatActionLocked
+                          ? "bg-amber-400/15 text-amber-100 hover:bg-amber-400/25"
+                          : "bg-white/5 text-stone-500",
+                      )}
                     >
                       进攻
                     </button>
                     <button
                       type="button"
+                      disabled={combatActionLocked}
                       onClick={() => performCombatAction({ type: "defend" })}
-                      className="rounded-[18px] bg-white/5 px-4 py-3 text-left text-sm text-stone-100 transition hover:bg-white/10"
+                      className={cn(
+                        "rounded-[18px] px-4 py-3 text-sm transition",
+                        !combatActionLocked
+                          ? "bg-white/5 text-stone-100 hover:bg-white/10"
+                          : "bg-white/5 text-stone-500",
+                      )}
                     >
                       防御
                     </button>
                     <button
                       type="button"
+                      disabled={combatActionLocked}
                       onClick={() => performCombatAction({ type: "flee" })}
-                      className="rounded-[18px] bg-white/5 px-4 py-3 text-left text-sm text-stone-100 transition hover:bg-white/10"
+                      className={cn(
+                        "rounded-[18px] px-4 py-3 text-sm transition",
+                        !combatActionLocked
+                          ? "bg-white/5 text-stone-100 hover:bg-white/10"
+                          : "bg-white/5 text-stone-500",
+                      )}
                     >
                       逃跑
                     </button>
                   </div>
 
-                  <div className="grid gap-3">
+                  <div className="grid gap-3 lg:grid-cols-2">
                     <div className="space-y-2">
-                      <p className="text-xs uppercase tracking-[0.24em] text-stone-500">技能</p>
+                      <p className="text-[11px] uppercase tracking-[0.24em] text-stone-500">技能</p>
                       <div className="grid gap-2">
                         {combat.player.skills.map((skill) => (
                           <button
                             type="button"
                             key={skill.id}
+                            disabled={combatActionLocked}
                             onClick={() =>
                               performCombatAction({
                                 type: "skill",
@@ -262,7 +466,12 @@ export default function Game() {
                                 targetId: skill.target === "enemy" ? combatTargetId || livingEnemies[0]?.id : undefined,
                               })
                             }
-                            className="rounded-[18px] border border-white/10 bg-white/5 px-4 py-3 text-left transition hover:bg-white/10"
+                            className={cn(
+                              "rounded-[18px] border px-4 py-3 text-left transition",
+                              !combatActionLocked
+                                ? "border-white/10 bg-white/5 hover:bg-white/10"
+                                : "border-white/10 bg-white/5 text-stone-500",
+                            )}
                           >
                             <div className="flex items-center justify-between gap-3">
                               <span className="text-sm text-stone-100">{skill.name}</span>
@@ -275,15 +484,21 @@ export default function Game() {
                     </div>
 
                     <div className="space-y-2">
-                      <p className="text-xs uppercase tracking-[0.24em] text-stone-500">道具</p>
+                      <p className="text-[11px] uppercase tracking-[0.24em] text-stone-500">道具</p>
                       <div className="grid gap-2">
                         {consumables.length > 0 ? (
                           consumables.map((item) => (
                             <button
                               type="button"
                               key={item.id}
+                              disabled={combatActionLocked}
                               onClick={() => performCombatAction({ type: "item", itemId: item.id })}
-                              className="rounded-[18px] border border-white/10 bg-white/5 px-4 py-3 text-left transition hover:bg-white/10"
+                              className={cn(
+                                "rounded-[18px] border px-4 py-3 text-left transition",
+                                !combatActionLocked
+                                  ? "border-white/10 bg-white/5 hover:bg-white/10"
+                                  : "border-white/10 bg-white/5 text-stone-500",
+                              )}
                             >
                               <p className="text-sm text-stone-100">{item.name}</p>
                               <p className="mt-1 text-xs leading-5 text-stone-500">{item.description}</p>
@@ -297,23 +512,46 @@ export default function Game() {
                       </div>
                     </div>
                   </div>
+
+                  {(combatActionLocked || isGenerating) ? (
+                    <div className="rounded-[18px] border border-cyan-300/20 bg-cyan-300/5 px-4 py-3 text-xs leading-5 text-cyan-100/90">
+                      {isGenerating
+                        ? "战斗已经结束，AI 正在接续战后剧情。"
+                        : "当前回合正在依次结算，请先看完你来我往的过程。"}
+                    </div>
+                  ) : null}
                 </div>
               </SectionCard>
             </div>
 
             <div className="grid gap-3 xl:max-h-[calc(100vh-13rem)] xl:overflow-y-auto xl:pr-1 xl:pb-2">
-              <SectionCard eyebrow="战斗日志" title="本场回放">
-                <div className="space-y-2">
-                  {combat.logs.length > 0 ? (
-                    [...combat.logs].reverse().map((log) => (
-                      <div key={log.id} className="rounded-[18px] border border-white/10 bg-white/5 px-4 py-3">
+              <SectionCard eyebrow="战斗播报" title="按回合回放">
+                <div className="space-y-3">
+                  {combatRounds.length > 0 ? (
+                    combatRounds.map((roundGroup) => (
+                      <div key={roundGroup.round} className="rounded-[20px] border border-white/10 bg-white/5 px-4 py-3">
                         <div className="flex items-center justify-between gap-3">
-                          <p className="text-sm text-stone-100">{log.actorName}</p>
-                          <span className="text-[11px] text-stone-600">R{log.round}</span>
+                          <p className="text-sm text-stone-100">第 {roundGroup.round} 回合</p>
+                          <span className="text-[11px] text-stone-600">
+                            {roundGroup.items.length} 步
+                          </span>
                         </div>
-                        <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-stone-400">
-                          {log.summary}
-                        </p>
+                        <div className="mt-3 space-y-2">
+                          {roundGroup.items.map((log) => (
+                            <div
+                              key={log.id}
+                              className={cn(
+                                "rounded-[16px] px-3 py-2 text-xs leading-5",
+                                log.actorId === "player"
+                                  ? "bg-amber-400/10 text-amber-100"
+                                  : "bg-white/5 text-stone-300",
+                              )}
+                            >
+                              <p className="text-[11px] opacity-75">{log.actorName}</p>
+                              <p className="mt-1 whitespace-pre-wrap">{log.summary}</p>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     ))
                   ) : (
@@ -321,6 +559,11 @@ export default function Game() {
                       {combat.introNarrative}
                     </div>
                   )}
+                  {isCombatAnimating ? (
+                    <div className="rounded-[18px] border border-cyan-300/20 bg-cyan-300/5 px-4 py-3 text-xs text-cyan-100">
+                      本回合正在分步播报中……
+                    </div>
+                  ) : null}
                 </div>
               </SectionCard>
 
