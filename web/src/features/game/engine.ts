@@ -707,3 +707,21 @@ export const resolveCombatAction = (
     result: null,
   };
 };
+
+export const buildCombatFollowupPrompt = (
+  save: SaveSlot,
+  result: "victory" | "defeat" | "fled",
+) => {
+  const combatEvent = save.recentEvents[0];
+  const player = save.player;
+  const resultLabel =
+    result === "victory" ? "我方获胜" : result === "defeat" ? "我方落败" : "我方成功脱离";
+
+  return [
+    "交战已经结束，请直接续写战后剧情，不要重新描写同一场战斗的出招过程。",
+    `战斗结果：${resultLabel}。`,
+    `战斗摘要：${combatEvent?.outcome ?? "战斗已经收束。"}`,
+    `当前状态：HP ${player.stats.hp}/${player.stats.hpMax}，MP ${player.stats.mp}/${player.stats.mpMax}，银两 ${player.money}。`,
+    "请重点描写现场反应、敌我关系变化、掉落/线索/后续选择，并给出新的对话模式选项。",
+  ].join("\n");
+};

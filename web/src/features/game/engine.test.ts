@@ -3,6 +3,7 @@ import {
   applyStoryResponse,
   applyTraining,
   beginCombat,
+  buildCombatFollowupPrompt,
   createNewSave,
   resolveCombatAction,
 } from "@/features/game/engine";
@@ -87,5 +88,42 @@ describe("game engine", () => {
 
     expect(resolved.updatedSave.player.stats.hp).toBeGreaterThanOrEqual(0);
     expect(resolved.updatedSave.recentEvents.length).toBeGreaterThan(0);
+  });
+
+  it("buildCombatFollowupPrompt summarizes the aftermath", () => {
+    const save = createNewSave("wudang");
+    const setup: CombatSetupResponse = {
+      title: "山道恶斗",
+      objective: "击退山贼",
+      introNarrative: "山贼拔刀围上。",
+      canFlee: true,
+      allies: [],
+      enemies: [
+        {
+          id: "npc-bandit",
+          name: "山贼首领",
+          side: "enemy",
+          level: 2,
+          hp: 1,
+          hpMax: 30,
+          mp: 0,
+          mpMax: 0,
+          atk: 5,
+          arm: 0,
+          aspd: 1,
+          skills: [],
+          isBoss: true,
+        },
+      ],
+    };
+    const combatSave = beginCombat(save, setup);
+    const resolved = resolveCombatAction(combatSave, {
+      type: "attack",
+      targetId: "npc-bandit",
+    });
+    expect(resolved.result).toBe("victory");
+    const prompt = buildCombatFollowupPrompt(resolved.updatedSave, "victory");
+    expect(prompt).toContain("交战已经结束");
+    expect(prompt).toContain("我方获胜");
   });
 });

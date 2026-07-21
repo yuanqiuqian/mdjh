@@ -3,6 +3,7 @@ import {
   applyStoryResponse,
   applyTraining,
   beginCombat,
+  buildCombatFollowupPrompt,
   createNewSave,
   makeId,
   resolveCombatAction,
@@ -375,17 +376,76 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     const resolution = resolveCombatAction(state.activeSave, action);
+    let updatedSave = resolution.updatedSave;
+
+    const configReady =
+      Boolean(state.llmConfig?.lastValidatedAt) && state.validation.status === "success";
+
+    if (resolution.finished && resolution.result && state.llmConfig && state.isOnline && configReady) {
+      const followupPrompt = buildCombatFollowupPrompt(updatedSave, resolution.result);
+      set({
+        isGenerating: true,
+        currentStoryRequest: followupPrompt,
+        lastStoryError: null,
+      });
+      try {
+        const { story, debug } = await requestStoryFromModel({
+          config: state.llmConfig,
+          save: updatedSave,
+          userInput: followupPrompt,
+          onProgress: (progressDebug) => {
+            set({ lastStoryDebug: progressDebug });
+          },
+        });
+        updatedSave = applyStoryResponse(updatedSave, followupPrompt, story);
+        if (story.directives?.mode_transition?.to === "combat") {
+          let combatSetup: CombatSetupResponse;
+          try {
+            combatSetup = await requestCombatSetupFromModel({
+              config: state.llmConfig,
+              save: updatedSave,
+              transitionReason: story.directives.mode_transition.reason,
+            });
+            if (combatSetup.enemies.length === 0) {
+              combatSetup = buildFallbackCombatSetup(
+                updatedSave,
+                story.directives.mode_transition.reason,
+              );
+            }
+          } catch {
+            combatSetup = buildFallbackCombatSetup(
+              updatedSave,
+              story.directives.mode_transition.reason,
+            );
+          }
+          updatedSave = beginCombat(updatedSave, combatSetup);
+        }
+        set({
+          isGenerating: false,
+          currentStoryRequest: null,
+          lastStoryDebug: debug,
+          lastStoryError: null,
+        });
+      } catch (error) {
+        set({
+          isGenerating: false,
+          currentStoryRequest: null,
+          lastStoryError:
+            error instanceof Error ? error.message : "战后剧情续写失败，请稍后重试。",
+        });
+      }
+    }
+
     const nextEntries = state.saveEntries.map((entry) => {
       if (entry.id === "active" || entry.id === "recent-stable") {
-        return { ...entry, data: resolution.updatedSave };
+        return { ...entry, data: updatedSave };
       }
       return entry;
     });
     await writeSaveEntries(nextEntries);
     set({
-      activeSave: resolution.updatedSave,
+      activeSave: updatedSave,
       saveEntries: nextEntries,
-      lastStoryError: null,
     });
   },
   saveToSlot: async (slotId) => {
