@@ -1,5 +1,12 @@
 import { sects } from "@/data/game-data";
 import type {
+  CombatActionInput,
+  CombatResolution,
+  CombatRoundLog,
+  CombatSetupResponse,
+  CombatSkill,
+  CombatState,
+  Combatant,
   EventRecord,
   InventoryItem,
   PlayerProfile,
@@ -59,6 +66,199 @@ const createStarterInventory = (sect: SectDefinition): InventoryItem[] => [
   },
 ];
 
+const createPlayerSkills = (sect: SectDefinition): CombatSkill[] => {
+  const sectSkillPower =
+    sect.type === "力量型" ? 26 : sect.type === "敏捷型" ? 22 : 24;
+  return [
+    {
+      id: `${sect.id}-starter`,
+      name: sect.starterSkill,
+      description: `施展${sect.name}入门招式，对单体造成更高伤害。`,
+      mpCost: 12,
+      power: sectSkillPower,
+      target: "enemy",
+      kind: "damage",
+    },
+    {
+      id: "recover-breath",
+      name: "调息回气",
+      description: "短暂稳住呼吸，回复少量气血与内力。",
+      mpCost: 8,
+      power: 18,
+      target: "self",
+      kind: "recover",
+    },
+  ];
+};
+
+const defaultEnemySkill = (name: string): CombatSkill => ({
+  id: `${name}-strike`,
+  name: "凶狠扑杀",
+  description: "山野亡命徒的粗暴攻击。",
+  mpCost: 0,
+  power: 18,
+  target: "enemy",
+  kind: "damage",
+});
+
+const createPlayerCombatant = (slot: SaveSlot): Combatant => {
+  const sect = getSectById(slot.player.sectId);
+  return {
+    id: "player",
+    name: slot.player.name,
+    side: "player",
+    level: slot.player.stats.level,
+    hp: slot.player.stats.hp,
+    hpMax: slot.player.stats.hpMax,
+    mp: slot.player.stats.mp,
+    mpMax: slot.player.stats.mpMax,
+    atk: slot.player.stats.atk,
+    arm: slot.player.stats.arm,
+    aspd: slot.player.stats.aspd,
+    skills: createPlayerSkills(sect),
+    status: {},
+  };
+};
+
+const normalizeCombatant = (input: Combatant, side: Combatant["side"]): Combatant => ({
+  id: input.id,
+  name: input.name,
+  side,
+  level: Math.max(1, input.level || 1),
+  hp: Math.max(1, Math.round(input.hp || input.hpMax || 80)),
+  hpMax: Math.max(1, Math.round(input.hpMax || input.hp || 80)),
+  mp: Math.max(0, Math.round(input.mp || input.mpMax || 0)),
+  mpMax: Math.max(0, Math.round(input.mpMax || input.mp || 0)),
+  atk: Math.max(8, Math.round(input.atk || 16)),
+  arm: Math.max(0, Math.round(input.arm || 6)),
+  aspd: Math.max(0.6, Number((input.aspd || 1).toFixed(2))),
+  skills:
+    input.skills && input.skills.length > 0
+      ? input.skills.map((skill) => ({
+          ...skill,
+          mpCost: Math.max(0, Math.round(skill.mpCost || 0)),
+          power: Math.max(1, Math.round(skill.power || 10)),
+        }))
+      : [defaultEnemySkill(input.name)],
+  status: input.status ?? {},
+  isBoss: input.isBoss,
+});
+
+const damageVariance = () => 0.9 + Math.random() * 0.2;
+
+const applyDamage = (target: Combatant, amount: number) => {
+  const reduced = target.status?.defending ? Math.round(amount * 0.55) : amount;
+  const nextHp = clamp(target.hp - reduced, 0, target.hpMax);
+  return {
+    target: { ...target, hp: nextHp },
+    actual: target.hp - nextHp,
+  };
+};
+
+const basicAttackDamage = (actor: Combatant, target: Combatant) =>
+  Math.max(4, Math.round(actor.atk * damageVariance() - target.arm * 0.45));
+
+const skillDamage = (actor: Combatant, target: Combatant, skill: CombatSkill) =>
+  Math.max(6, Math.round((actor.atk + skill.power) * damageVariance() - target.arm * 0.35));
+
+const findCombatant = (list: Combatant[], id: string) => list.find((item) => item.id === id);
+
+const updateCombatant = (list: Combatant[], next: Combatant) =>
+  list.map((item) => (item.id === next.id ? next : item));
+
+const aliveEnemies = (combat: CombatState) => combat.enemies.filter((enemy) => enemy.hp > 0);
+
+const syncPlayerStats = (save: SaveSlot, combatPlayer: Combatant) => ({
+  ...save,
+  player: {
+    ...save.player,
+    stats: {
+      ...save.player.stats,
+      hp: combatPlayer.hp,
+      hpMax: combatPlayer.hpMax,
+      mp: combatPlayer.mp,
+      mpMax: combatPlayer.mpMax,
+      atk: combatPlayer.atk,
+      arm: combatPlayer.arm,
+      aspd: combatPlayer.aspd,
+      level: combatPlayer.level,
+    },
+  },
+});
+
+const summarizeCombatLogs = (logs: CombatState["logs"]) =>
+  logs
+    .slice(-4)
+    .map((log) => log.summary)
+    .join(" ");
+
+const finalizeCombat = (
+  save: SaveSlot,
+  combat: CombatState,
+  result: "victory" | "defeat" | "fled",
+): SaveSlot => {
+  const player = { ...combat.player, status: {} };
+  let updated: SaveSlot = syncPlayerStats(save, player);
+  const latestEnemyName = combat.enemies.find((enemy) => enemy.isBoss)?.name ?? combat.enemies[0]?.name ?? "敌人";
+  const summary =
+    result === "victory"
+      ? `你在第 ${combat.round} 回合击溃了${latestEnemyName}一方。`
+      : result === "fled"
+        ? `你趁乱脱离了战场，暂时摆脱${latestEnemyName}的追击。`
+        : `你在激斗中落败，被迫退出这场冲突。`;
+  const nextActions =
+    result === "victory"
+      ? ["搜查战场", "安抚路人", "继续上路"]
+      : result === "fled"
+        ? ["先疗伤", "回头观察", "继续赶路"]
+        : ["疗伤", "整理思绪", "查看卷册"];
+
+  const event: EventRecord = {
+    id: makeId("evt"),
+    timestamp: new Date().toISOString(),
+    sceneType: "combat",
+    title: `战斗结算：${combat.title}`,
+    narrative: combat.introNarrative,
+    outcome: `${summary} ${summarizeCombatLogs(combat.logs)}`.trim(),
+    deltas: {
+      hp: player.hp - save.player.stats.hp,
+      mp: player.mp - save.player.stats.mp,
+    },
+  };
+
+  updated = {
+    ...updated,
+    updatedAt: new Date().toISOString(),
+    gameMode: "dialogue",
+    combatState: null,
+    recentEvents: [event, ...updated.recentEvents].slice(0, 50),
+    longSummary: [
+      ...updated.longSummary,
+      `${new Date().toLocaleString("zh-CN")}：${summary}`,
+    ].slice(-12),
+    suggestedActions: nextActions,
+    relations: updated.relations.map((relation) => {
+      if (combat.enemies.some((enemy) => enemy.id === relation.id)) {
+        return {
+          ...relation,
+          favor: result === "victory" ? -100 : result === "fled" ? relation.favor - 10 : relation.favor - 20,
+          note: result === "victory" ? "你在战斗中彻底压制了对方。" : "战斗后的敌意进一步加深。",
+        };
+      }
+      if (relation.id === "npc-passenger" && result === "victory") {
+        return {
+          ...relation,
+          favor: relation.favor + 20,
+          note: "你出手击退山贼后，对方对你感激不尽。",
+        };
+      }
+      return relation;
+    }),
+  };
+
+  return updated;
+};
+
 export const makeId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 
@@ -94,6 +294,7 @@ export const createNewSave = (sectId: string): SaveSlot => {
     slotId: "active",
     name: "当前进度",
     updatedAt: new Date().toISOString(),
+    gameMode: "dialogue",
     player,
     relations: [
       { id: "npc-passenger", name: "受困路人", favor: 0, note: "尚未交谈。" },
@@ -103,8 +304,25 @@ export const createNewSave = (sectId: string): SaveSlot => {
     recentEvents: [openingEvent],
     longSummary: ["你刚下山，尚未形成固定立场，江湖将根据你的选择逐步回应。"],
     suggestedActions: ["上前相助", "暗中观察", "与山贼交涉"],
+    combatState: null,
   };
 };
+
+export const createCombatState = (
+  save: SaveSlot,
+  setup: CombatSetupResponse,
+): CombatState => ({
+  id: makeId("combat"),
+  title: setup.title,
+  objective: setup.objective,
+  introNarrative: setup.introNarrative,
+  player: createPlayerCombatant(save),
+  allies: (setup.allies ?? []).map((ally) => normalizeCombatant(ally, "ally")),
+  enemies: (setup.enemies ?? []).map((enemy) => normalizeCombatant(enemy, "enemy")),
+  round: 1,
+  canFlee: setup.canFlee,
+  logs: [],
+});
 
 export const applyTraining = (
   slot: SaveSlot,
@@ -217,7 +435,11 @@ export const applyStoryResponse = (
   const event: EventRecord = {
     id: makeId("evt"),
     timestamp: new Date().toISOString(),
-    sceneType: "dialogue",
+    sceneType:
+      response.directives?.scene_type === "combat" ||
+      response.directives?.mode_transition?.to === "combat"
+        ? "combat"
+        : "dialogue",
     title: `江湖回合：${userInput.slice(0, 12) || "继续前行"}`,
     narrative: response.narrative,
     outcome:
@@ -248,5 +470,240 @@ export const applyStoryResponse = (
       `${new Date().toLocaleString("zh-CN")}：${event.title}，${event.outcome}`,
     ].slice(-12),
     suggestedActions: nextOptions.length > 0 ? nextOptions : slot.suggestedActions,
+  };
+};
+
+export const beginCombat = (slot: SaveSlot, setup: CombatSetupResponse): SaveSlot => ({
+  ...slot,
+  updatedAt: new Date().toISOString(),
+  gameMode: "combat",
+  combatState: createCombatState(slot, setup),
+});
+
+export const resolveCombatAction = (
+  slot: SaveSlot,
+  action: CombatActionInput,
+): CombatResolution => {
+  const combat = slot.combatState;
+  if (!combat) {
+    return {
+      combat: null,
+      updatedSave: slot,
+      finished: false,
+      result: null,
+    };
+  }
+
+  let nextCombat: CombatState = {
+    ...combat,
+    player: { ...combat.player, status: {} },
+    enemies: combat.enemies.map((enemy) => ({ ...enemy, status: {} })),
+    allies: combat.allies.map((ally) => ({ ...ally, status: {} })),
+    logs: [...combat.logs],
+  };
+  let nextInventory = [...slot.inventory];
+
+  const pushLog = (actorName: string, actorId: string, actionType: CombatRoundLog["actionType"], summary: string) => {
+    nextCombat = {
+      ...nextCombat,
+      logs: [
+        ...nextCombat.logs,
+        {
+          id: makeId("clog"),
+          round: nextCombat.round,
+          actorId,
+          actorName,
+          actionType,
+          summary,
+        },
+      ].slice(-24),
+    };
+  };
+
+  if (action.type === "attack") {
+    const target = findCombatant(nextCombat.enemies, action.targetId);
+    if (target && target.hp > 0) {
+      const damage = basicAttackDamage(nextCombat.player, target);
+      const { target: updatedTarget, actual } = applyDamage(target, damage);
+      nextCombat = { ...nextCombat, enemies: updateCombatant(nextCombat.enemies, updatedTarget) };
+      pushLog(nextCombat.player.name, nextCombat.player.id, "attack", `${nextCombat.player.name}挥出兵刃，命中${target.name}，造成 ${actual} 点伤害。`);
+    }
+  }
+
+  if (action.type === "defend") {
+    nextCombat = {
+      ...nextCombat,
+      player: {
+        ...nextCombat.player,
+        status: { ...nextCombat.player.status, defending: true },
+      },
+    };
+    pushLog(nextCombat.player.name, nextCombat.player.id, "defend", `${nextCombat.player.name}稳住架势，本回合将大幅减伤。`);
+  }
+
+  if (action.type === "skill") {
+    const skill = nextCombat.player.skills.find((item) => item.id === action.skillId);
+    if (!skill) {
+      pushLog(nextCombat.player.name, nextCombat.player.id, "skill", `${nextCombat.player.name}试图运功，却没能使出有效招式。`);
+    } else if (nextCombat.player.mp < skill.mpCost) {
+      pushLog(nextCombat.player.name, nextCombat.player.id, "skill", `${nextCombat.player.name}内力不足，${skill.name}未能成功施展。`);
+    } else if (skill.kind === "recover") {
+      const nextHp = clamp(nextCombat.player.hp + skill.power, 0, nextCombat.player.hpMax);
+      const nextMp = clamp(nextCombat.player.mp - skill.mpCost + Math.round(skill.power * 0.45), 0, nextCombat.player.mpMax);
+      nextCombat = {
+        ...nextCombat,
+        player: {
+          ...nextCombat.player,
+          hp: nextHp,
+          mp: nextMp,
+        },
+      };
+      pushLog(nextCombat.player.name, nextCombat.player.id, "skill", `${nextCombat.player.name}运转${skill.name}，恢复了伤势与气息。`);
+    } else {
+      const targetId = action.targetId ?? aliveEnemies(nextCombat)[0]?.id;
+      const target = targetId ? findCombatant(nextCombat.enemies, targetId) : undefined;
+      if (target && target.hp > 0) {
+        const damage = skillDamage(nextCombat.player, target, skill);
+        const { target: updatedTarget, actual } = applyDamage(target, damage);
+        nextCombat = {
+          ...nextCombat,
+          player: { ...nextCombat.player, mp: clamp(nextCombat.player.mp - skill.mpCost, 0, nextCombat.player.mpMax) },
+          enemies: updateCombatant(nextCombat.enemies, updatedTarget),
+        };
+        pushLog(nextCombat.player.name, nextCombat.player.id, "skill", `${nextCombat.player.name}施展${skill.name}，对${target.name}造成 ${actual} 点伤害。`);
+      }
+    }
+  }
+
+  if (action.type === "item") {
+    const itemIndex = nextInventory.findIndex((item) => item.id === action.itemId);
+    const item = itemIndex >= 0 ? nextInventory[itemIndex] : undefined;
+    if (item && item.type === "消耗品") {
+      nextInventory.splice(itemIndex, 1);
+      const recoverHp = item.name.includes("伤") ? 24 : 10;
+      const recoverMp = item.name.includes("气") ? 22 : 6;
+      nextCombat = {
+        ...nextCombat,
+        player: {
+          ...nextCombat.player,
+          hp: clamp(nextCombat.player.hp + recoverHp, 0, nextCombat.player.hpMax),
+          mp: clamp(nextCombat.player.mp + recoverMp, 0, nextCombat.player.mpMax),
+        },
+      };
+      pushLog(nextCombat.player.name, nextCombat.player.id, "item", `${nextCombat.player.name}使用${item.name}，回复状态后继续应战。`);
+    } else {
+      pushLog(nextCombat.player.name, nextCombat.player.id, "item", `${nextCombat.player.name}翻找道具，却没找到能立刻派上用场的物品。`);
+    }
+  }
+
+  if (action.type === "flee") {
+    const escapeChance = Math.min(0.9, 0.35 + nextCombat.player.aspd * 0.18 - aliveEnemies(nextCombat).length * 0.06);
+    if (nextCombat.canFlee && Math.random() < escapeChance) {
+      pushLog(nextCombat.player.name, nextCombat.player.id, "flee", `${nextCombat.player.name}抓住空档脱离战场。`);
+      const updatedSave = finalizeCombat(
+        {
+          ...slot,
+          inventory: nextInventory,
+          combatState: nextCombat,
+        },
+        nextCombat,
+        "fled",
+      );
+      return { combat: null, updatedSave, finished: true, result: "fled" };
+    }
+    pushLog(nextCombat.player.name, nextCombat.player.id, "flee", `${nextCombat.player.name}试图抽身撤离，却被敌人死死缠住。`);
+  }
+
+  if (aliveEnemies(nextCombat).length === 0) {
+    const updatedSave = finalizeCombat(
+      {
+        ...slot,
+        inventory: nextInventory,
+        combatState: nextCombat,
+      },
+      nextCombat,
+      "victory",
+    );
+    return { combat: null, updatedSave, finished: true, result: "victory" };
+  }
+
+  for (const enemy of aliveEnemies(nextCombat)) {
+    let actingEnemy = findCombatant(nextCombat.enemies, enemy.id);
+    if (!actingEnemy || actingEnemy.hp <= 0) {
+      continue;
+    }
+    const usableRecover = actingEnemy.skills.find(
+      (skill) => skill.kind === "recover" && actingEnemy && actingEnemy.mp >= skill.mpCost && actingEnemy.hp / actingEnemy.hpMax < 0.35,
+    );
+    const usableDamage = actingEnemy.skills.find(
+      (skill) => skill.kind === "damage" && actingEnemy && actingEnemy.mp >= skill.mpCost,
+    );
+
+    if (usableRecover) {
+      actingEnemy = {
+        ...actingEnemy,
+        hp: clamp(actingEnemy.hp + usableRecover.power, 0, actingEnemy.hpMax),
+        mp: clamp(actingEnemy.mp - usableRecover.mpCost, 0, actingEnemy.mpMax),
+      };
+      nextCombat = { ...nextCombat, enemies: updateCombatant(nextCombat.enemies, actingEnemy) };
+      pushLog(actingEnemy.name, actingEnemy.id, "skill", `${actingEnemy.name}运转${usableRecover.name}，暂时稳住伤势。`);
+      continue;
+    }
+
+    if (usableDamage && Math.random() < (actingEnemy.isBoss ? 0.55 : 0.35)) {
+      const damage = skillDamage(actingEnemy, nextCombat.player, usableDamage);
+      const { target: updatedPlayer, actual } = applyDamage(nextCombat.player, damage);
+      nextCombat = {
+        ...nextCombat,
+        player: updatedPlayer,
+        enemies: updateCombatant(nextCombat.enemies, {
+          ...actingEnemy,
+          mp: clamp(actingEnemy.mp - usableDamage.mpCost, 0, actingEnemy.mpMax),
+        }),
+      };
+      pushLog(actingEnemy.name, actingEnemy.id, "skill", `${actingEnemy.name}使出${usableDamage.name}，对你造成 ${actual} 点伤害。`);
+    } else {
+      const damage = basicAttackDamage(actingEnemy, nextCombat.player);
+      const { target: updatedPlayer, actual } = applyDamage(nextCombat.player, damage);
+      nextCombat = { ...nextCombat, player: updatedPlayer };
+      pushLog(actingEnemy.name, actingEnemy.id, "attack", `${actingEnemy.name}趁隙猛攻，对你造成 ${actual} 点伤害。`);
+    }
+
+    if (nextCombat.player.hp <= 0) {
+      const updatedSave = finalizeCombat(
+        {
+          ...slot,
+          inventory: nextInventory,
+          combatState: nextCombat,
+        },
+        nextCombat,
+        "defeat",
+      );
+      return { combat: null, updatedSave, finished: true, result: "defeat" };
+    }
+  }
+
+  nextCombat = {
+    ...nextCombat,
+    round: nextCombat.round + 1,
+    player: {
+      ...nextCombat.player,
+      status: {},
+    },
+  };
+
+  const updatedSave = {
+    ...syncPlayerStats(slot, nextCombat.player),
+    updatedAt: new Date().toISOString(),
+    inventory: nextInventory,
+    gameMode: "combat" as const,
+    combatState: nextCombat,
+  };
+
+  return {
+    combat: nextCombat,
+    updatedSave,
+    finished: false,
+    result: null,
   };
 };

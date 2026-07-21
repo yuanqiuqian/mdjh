@@ -1,4 +1,6 @@
 import type {
+  CombatSetupResponse,
+  Combatant,
   LlmConfig,
   SaveSlot,
   StoryDebugInfo,
@@ -184,7 +186,9 @@ const buildContextPacket = (save: SaveSlot, currentPrompt: string) => ({
     "必须输出合法 JSON，不要输出 JSON 之外的解释。",
     "不得修改存档中未被本轮事件解释的关键资源。",
     "所有状态变化都必须小幅、合理、可追溯。",
+    "平时以对话模式推进剧情；当发生明确攻击、围杀、追击、拔刀冲突时，可切换到 combat 模式。",
   ],
+  game_mode: save.gameMode,
   player_state: {
     name: save.player.name,
     title: save.player.title,
@@ -208,6 +212,23 @@ const buildContextPacket = (save: SaveSlot, currentPrompt: string) => ({
     outcome: event.outcome,
     deltas: event.deltas,
   })),
+  active_combat:
+    save.gameMode === "combat" && save.combatState
+      ? {
+          title: save.combatState.title,
+          objective: save.combatState.objective,
+          round: save.combatState.round,
+          player_hp: save.combatState.player.hp,
+          player_mp: save.combatState.player.mp,
+          alive_enemies: save.combatState.enemies.filter((enemy) => enemy.hp > 0).map((enemy) => ({
+            id: enemy.id,
+            name: enemy.name,
+            hp: enemy.hp,
+            hpMax: enemy.hpMax,
+          })),
+          recent_logs: save.combatState.logs.slice(-5).map((log) => log.summary),
+        }
+      : null,
   current_prompt: currentPrompt,
 });
 
@@ -217,6 +238,7 @@ const storySystemPrompt = `
 {
   "narrative": "面向玩家的叙事文本，允许换行",
   "directives": {
+    "scene_type": "dialogue 或 combat",
     "next_options": [
       { "label": "选项标题", "hint": "简短提示", "risk": "风险提示，可选" }
     ],
@@ -226,14 +248,69 @@ const storySystemPrompt = `
       "exp_delta": 0,
       "money_delta": 0
     },
-    "hooks": ["后续伏笔"]
+    "hooks": ["后续伏笔"],
+    "mode_transition": {
+      "to": "dialogue 或 combat",
+      "reason": "触发原因"
+    },
+    "combat_hint": {
+      "title": "战斗标题",
+      "objective": "战斗目标",
+      "can_flee": true
+    }
   }
 }
 要求：
 1. narrative 必须是中文。
 2. next_options 提供 2 到 4 个。
 3. 数值变化保持小幅合理，默认在 -20 到 +20 区间内。
-4. 不要输出 markdown 代码块，不要解释。
+4. 当玩家输入表现出明确攻击、击杀、拔刀、追击意图，且局势合理时，应切换到 combat 模式，而不是继续长时间对话拉扯。
+5. 如果本回合仍处于普通对话，则 mode_transition.to 保持为 dialogue。
+6. 不要输出 markdown 代码块，不要解释。
+`.trim();
+
+const combatSetupSystemPrompt = `
+你正在为武侠江湖文字游戏初始化一场回合制战斗。
+请严格返回 JSON，格式如下：
+{
+  "title": "战斗标题",
+  "objective": "战斗目标",
+  "introNarrative": "战斗开始前的简短描述",
+  "canFlee": true,
+  "allies": [],
+  "enemies": [
+    {
+      "id": "enemy_id",
+      "name": "敌人名称",
+      "side": "enemy",
+      "level": 1,
+      "hp": 100,
+      "hpMax": 100,
+      "mp": 20,
+      "mpMax": 20,
+      "atk": 18,
+      "arm": 6,
+      "aspd": 1,
+      "isBoss": false,
+      "skills": [
+        {
+          "id": "skill_id",
+          "name": "技能名",
+          "description": "技能说明",
+          "mpCost": 0,
+          "power": 20,
+          "target": "enemy",
+          "kind": "damage"
+        }
+      ]
+    }
+  ]
+}
+要求：
+1. 返回 1 到 3 个 enemies，必要时可包含 0 到 1 个 allies。
+2. 数值为初期战斗合理范围：普通敌人 hp 60-140，boss hp 120-220，atk 12-28，arm 4-12。
+3. 技能保持简洁，1 到 2 个即可。
+4. 不要输出解释，不要输出 markdown。
 `.trim();
 
 const getRecord = (value: unknown): Record<string, unknown> | null => {
@@ -495,10 +572,16 @@ export const parseStoryResponse = (content: string): StoryResponse => {
     }));
 
   const hookSource = Array.isArray(directives?.hooks) ? directives.hooks : [];
+  const modeTransition = getRecord(directives?.mode_transition);
+  const combatHint = getRecord(directives?.combat_hint);
 
   return {
     narrative,
     directives: {
+      scene_type:
+        directives?.scene_type === "combat"
+          ? "combat"
+          : "dialogue",
       next_options: nextOptions,
       suggested_deltas: {
         hp_delta: clampDelta(
@@ -517,7 +600,104 @@ export const parseStoryResponse = (content: string): StoryResponse => {
       hooks: hookSource
         .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
         .slice(0, 4),
+      mode_transition:
+        modeTransition?.to === "combat" || modeTransition?.to === "dialogue"
+          ? {
+              to: modeTransition.to,
+              reason:
+                typeof modeTransition.reason === "string" && modeTransition.reason.trim()
+                  ? modeTransition.reason.trim()
+                  : modeTransition.to === "combat"
+                    ? "局势升级为交战。"
+                    : "剧情继续处于对话阶段。",
+            }
+          : undefined,
+      combat_hint: combatHint
+        ? {
+            title:
+              typeof combatHint.title === "string" && combatHint.title.trim()
+                ? combatHint.title.trim()
+                : undefined,
+            objective:
+              typeof combatHint.objective === "string" && combatHint.objective.trim()
+                ? combatHint.objective.trim()
+                : undefined,
+            can_flee: Boolean(combatHint.can_flee),
+          }
+        : undefined,
     },
+  };
+};
+
+const parseCombatantList = (value: unknown, side: Combatant["side"]): Combatant[] => {
+  if (!Array.isArray(value)) {
+    return [] as Combatant[];
+  }
+
+  return value
+    .map((item) => getRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .filter((item) => typeof item.id === "string" && typeof item.name === "string")
+    .slice(0, side === "enemy" ? 3 : 1)
+    .map((item) => {
+      const skillsSource = Array.isArray(item.skills) ? item.skills : [];
+      return {
+        id: item.id as string,
+        name: item.name as string,
+        side,
+        level: typeof item.level === "number" ? Math.max(1, Math.round(item.level)) : 1,
+        hp: typeof item.hp === "number" ? Math.max(1, Math.round(item.hp)) : 90,
+        hpMax: typeof item.hpMax === "number" ? Math.max(1, Math.round(item.hpMax)) : typeof item.hp === "number" ? Math.max(1, Math.round(item.hp)) : 90,
+        mp: typeof item.mp === "number" ? Math.max(0, Math.round(item.mp)) : 0,
+        mpMax: typeof item.mpMax === "number" ? Math.max(0, Math.round(item.mpMax)) : typeof item.mp === "number" ? Math.max(0, Math.round(item.mp)) : 0,
+        atk: typeof item.atk === "number" ? Math.max(8, Math.round(item.atk)) : 16,
+        arm: typeof item.arm === "number" ? Math.max(0, Math.round(item.arm)) : 6,
+        aspd: typeof item.aspd === "number" ? Math.max(0.6, Number(item.aspd.toFixed(2))) : 1,
+        isBoss: Boolean(item.isBoss),
+        skills: skillsSource
+          .map((skill) => getRecord(skill))
+          .filter((skill): skill is Record<string, unknown> => Boolean(skill))
+          .filter((skill) => typeof skill.id === "string" && typeof skill.name === "string")
+          .slice(0, 2)
+          .map((skill) => ({
+            id: skill.id as string,
+            name: skill.name as string,
+            description:
+              typeof skill.description === "string" && skill.description.trim()
+                ? skill.description.trim()
+                : "战斗技能",
+            mpCost: typeof skill.mpCost === "number" ? Math.max(0, Math.round(skill.mpCost)) : 0,
+            power: typeof skill.power === "number" ? Math.max(1, Math.round(skill.power)) : 16,
+            target: (skill.target === "self" ? "self" : "enemy") as "self" | "enemy",
+            kind: (skill.kind === "recover" ? "recover" : "damage") as "recover" | "damage",
+          })),
+      };
+    });
+};
+
+export const parseCombatSetupResponse = (content: string): CombatSetupResponse => {
+  const json = extractJson(content);
+  const parsed = JSON.parse(json) as unknown;
+  const root = getRecord(parsed);
+  const enemies = parseCombatantList(root?.enemies, "enemy");
+  const allies = parseCombatantList(root?.allies, "ally");
+
+  return {
+    title:
+      typeof root?.title === "string" && root.title.trim()
+        ? root.title.trim()
+        : "突发交战",
+    objective:
+      typeof root?.objective === "string" && root.objective.trim()
+        ? root.objective.trim()
+        : "击退当前敌人并活下来。",
+    introNarrative:
+      typeof root?.introNarrative === "string" && root.introNarrative.trim()
+        ? root.introNarrative.trim()
+        : "双方气机骤然绷紧，转眼便到了拔刀相向的地步。",
+    canFlee: root?.canFlee !== false,
+    allies,
+    enemies,
   };
 };
 
@@ -557,6 +737,72 @@ const requestStoryFromModelAsJson = async ({
     rawPayload: JSON.stringify(payload, null, 2),
     rawContent: extractContent(payload),
   };
+};
+
+export const requestCombatSetupFromModel = async ({
+  config,
+  save,
+  transitionReason,
+}: {
+  config: LlmConfig;
+  save: SaveSlot;
+  transitionReason: string;
+}): Promise<CombatSetupResponse> => {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const response = await fetch(buildChatCompletionsUrl(config.endpoint), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.modelId,
+        temperature: 0.4,
+        max_tokens: 900,
+        messages: [
+          { role: "system", content: combatSetupSystemPrompt },
+          {
+            role: "user",
+            content: JSON.stringify({
+              trigger_reason: transitionReason,
+              player_state: {
+                name: save.player.name,
+                title: save.player.title,
+                sect_id: save.player.sectId,
+                stats: save.player.stats,
+              },
+              known_characters: save.relations.slice(0, 8),
+              recent_events: save.recentEvents.slice(0, 8),
+              long_summary: save.longSummary.slice(-6),
+            }),
+          },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    window.clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(await getErrorText(response));
+    }
+
+    const payload = await response.json();
+    const content = extractContent(payload);
+    if (!content.trim()) {
+      throw new Error("模型未返回可用的战斗初始化数据。");
+    }
+    return parseCombatSetupResponse(content);
+  } catch (error) {
+    window.clearTimeout(timeoutId);
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error("战斗初始化失败，请稍后重试。");
+  }
 };
 
 /**

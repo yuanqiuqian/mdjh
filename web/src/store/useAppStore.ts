@@ -1,5 +1,12 @@
 import { create } from "zustand";
-import { createNewSave, applyStoryResponse, applyTraining, makeId } from "@/features/game/engine";
+import {
+  applyStoryResponse,
+  applyTraining,
+  beginCombat,
+  createNewSave,
+  makeId,
+  resolveCombatAction,
+} from "@/features/game/engine";
 import { trainingActions } from "@/data/game-data";
 import {
   clearLlmConfig,
@@ -9,8 +16,15 @@ import {
   putLlmConfig,
   putSaveEntry,
 } from "@/services/db";
-import { requestStoryFromModel } from "@/services/llm";
-import type { LlmConfig, SaveEntry, SaveSlot, StoryDebugInfo } from "@/types/game";
+import { requestCombatSetupFromModel, requestStoryFromModel } from "@/services/llm";
+import type {
+  CombatActionInput,
+  CombatSetupResponse,
+  LlmConfig,
+  SaveEntry,
+  SaveSlot,
+  StoryDebugInfo,
+} from "@/types/game";
 
 const createInitialEntries = (): SaveEntry[] => [
   { id: "active", kind: "active", label: "当前进度", data: null },
@@ -53,6 +67,7 @@ type AppState = {
   applyOfflineTraining: (actionId: string) => Promise<void>;
   appendNote: (note: string) => Promise<void>;
   progressStory: (input: string) => Promise<void>;
+  performCombatAction: (action: CombatActionInput) => Promise<void>;
   saveToSlot: (slotId: string) => Promise<void>;
   loadFromSlot: (slotId: string) => Promise<void>;
   clearSlot: (slotId: string) => Promise<void>;
@@ -61,6 +76,55 @@ type AppState = {
 const writeSaveEntries = async (entries: SaveEntry[]) => {
   await Promise.all(entries.map((entry) => putSaveEntry(entry)));
 };
+
+const buildFallbackCombatSetup = (save: SaveSlot, reason: string): CombatSetupResponse => ({
+  title: "青石古道恶斗",
+  objective: "击退拦路山贼，保住自己与路人。",
+  introNarrative: reason || "对方率先拔刀，古道上的局势骤然升级为正面厮杀。",
+  canFlee: true,
+  allies: [],
+  enemies: [
+    {
+      id: "npc-bandit",
+      name: "山贼首领",
+      side: "enemy",
+      level: Math.max(1, save.player.stats.level + 1),
+      hp: 136,
+      hpMax: 136,
+      mp: 24,
+      mpMax: 24,
+      atk: 22,
+      arm: 8,
+      aspd: 0.94,
+      isBoss: true,
+      skills: [
+        {
+          id: "bandit-cleave",
+          name: "横刀猛斩",
+          description: "抡起大刀猛力劈砍。",
+          mpCost: 6,
+          power: 22,
+          target: "enemy",
+          kind: "damage",
+        },
+      ],
+    },
+    {
+      id: "bandit-goon-1",
+      name: "山贼喽啰",
+      side: "enemy",
+      level: save.player.stats.level,
+      hp: 84,
+      hpMax: 84,
+      mp: 0,
+      mpMax: 0,
+      atk: 15,
+      arm: 5,
+      aspd: 1.02,
+      skills: [],
+    },
+  ],
+});
 
 export const useAppStore = create<AppState>((set, get) => ({
   isHydrated: false,
@@ -237,7 +301,29 @@ export const useAppStore = create<AppState>((set, get) => ({
           set({ lastStoryDebug: progressDebug });
         },
       });
-      const updated = applyStoryResponse(state.activeSave, trimmed, story);
+      let updated = applyStoryResponse(state.activeSave, trimmed, story);
+      if (story.directives?.mode_transition?.to === "combat") {
+        let combatSetup: CombatSetupResponse;
+        try {
+          combatSetup = await requestCombatSetupFromModel({
+            config: state.llmConfig,
+            save: updated,
+            transitionReason: story.directives.mode_transition.reason,
+          });
+          if (combatSetup.enemies.length === 0) {
+            combatSetup = buildFallbackCombatSetup(
+              updated,
+              story.directives.mode_transition.reason,
+            );
+          }
+        } catch {
+          combatSetup = buildFallbackCombatSetup(
+            updated,
+            story.directives.mode_transition.reason,
+          );
+        }
+        updated = beginCombat(updated, combatSetup);
+      }
       const nextEntries = state.saveEntries.map((entry) => {
         if (entry.id === "active" || entry.id === "recent-stable") {
           return { ...entry, data: updated };
@@ -282,6 +368,25 @@ export const useAppStore = create<AppState>((set, get) => ({
         lastStoryError: message,
       });
     }
+  },
+  performCombatAction: async (action) => {
+    const state = get();
+    if (!state.activeSave || state.activeSave.gameMode !== "combat" || !state.activeSave.combatState) {
+      return;
+    }
+    const resolution = resolveCombatAction(state.activeSave, action);
+    const nextEntries = state.saveEntries.map((entry) => {
+      if (entry.id === "active" || entry.id === "recent-stable") {
+        return { ...entry, data: resolution.updatedSave };
+      }
+      return entry;
+    });
+    await writeSaveEntries(nextEntries);
+    set({
+      activeSave: resolution.updatedSave,
+      saveEntries: nextEntries,
+      lastStoryError: null,
+    });
   },
   saveToSlot: async (slotId) => {
     const state = get();

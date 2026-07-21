@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildChatCompletionsUrl,
   extractNarrativePreview,
+  parseCombatSetupResponse,
   parseStoryResponse,
 } from "@/services/llm";
 
@@ -44,5 +45,57 @@ describe("llm helpers", () => {
     expect(extractNarrativePreview(partial)).toBe(
       "雨声渐密，客栈外的灯火在风里摇晃\n你按住剑柄，听见门外有马蹄",
     );
+  });
+
+  it("parseStoryResponse keeps mode transition metadata", () => {
+    const content = JSON.stringify({
+      narrative: "山贼拔刀扑来。",
+      directives: {
+        scene_type: "combat",
+        next_options: [{ label: "迎战" }],
+        mode_transition: {
+          to: "combat",
+          reason: "冲突已经升级成正面厮杀。",
+        },
+        combat_hint: {
+          title: "古道交战",
+          objective: "击退山贼",
+          can_flee: true,
+        },
+      },
+    });
+    const parsed = parseStoryResponse(content);
+    expect(parsed.directives?.scene_type).toBe("combat");
+    expect(parsed.directives?.mode_transition?.to).toBe("combat");
+    expect(parsed.directives?.combat_hint?.title).toBe("古道交战");
+  });
+
+  it("parseCombatSetupResponse extracts battle roster", () => {
+    const content = JSON.stringify({
+      title: "青石古道恶斗",
+      objective: "击退山贼首领",
+      introNarrative: "刀光一闪，双方正式开打。",
+      canFlee: true,
+      enemies: [
+        {
+          id: "npc-bandit",
+          name: "山贼首领",
+          level: 2,
+          hp: 120,
+          hpMax: 120,
+          mp: 10,
+          mpMax: 10,
+          atk: 20,
+          arm: 8,
+          aspd: 0.95,
+          isBoss: true,
+          skills: [{ id: "cut", name: "猛斩", mpCost: 4, power: 20, target: "enemy", kind: "damage" }],
+        },
+      ],
+    });
+    const parsed = parseCombatSetupResponse(content);
+    expect(parsed.title).toBe("青石古道恶斗");
+    expect(parsed.enemies[0]?.name).toBe("山贼首领");
+    expect(parsed.enemies[0]?.skills[0]?.name).toBe("猛斩");
   });
 });
