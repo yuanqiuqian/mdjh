@@ -1,5 +1,5 @@
 export type SectType = "力量型" | "敏捷型" | "智力型";
-export type GameMode = "dialogue" | "combat";
+export type GameMode = "dialogue" | "combat" | "gameover";
 
 export type SectDefinition = {
   id: string;

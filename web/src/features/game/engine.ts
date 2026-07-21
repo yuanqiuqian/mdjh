@@ -20,6 +20,8 @@ import type {
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
 
+const MAX_CONSECUTIVE_TRAINING = 2;
+
 const createBaseStats = (sect: SectDefinition): PlayerStats => {
   const base = {
     level: 1,
@@ -309,19 +311,25 @@ const finalizeCombat = (
   const player = { ...combat.player, status: {} };
   const loot = buildCombatLoot(combat, result);
   let updated: SaveSlot = syncPlayerStats(save, player);
+  const isPlayerDead = result === "defeat" && player.hp <= 0;
   const latestEnemyName = combat.enemies.find((enemy) => enemy.isBoss)?.name ?? combat.enemies[0]?.name ?? "敌人";
   const summary =
-    result === "victory"
+    isPlayerDead
+      ? "你在激斗中力竭倒下，这场江湖路暂时走到了尽头。"
+      : result === "victory"
       ? `你在第 ${combat.round} 回合击溃了${latestEnemyName}一方。`
       : result === "fled"
         ? `你趁乱脱离了战场，暂时摆脱${latestEnemyName}的追击。`
         : `你在激斗中落败，被迫退出这场冲突。`;
   const nextActions =
-    result === "victory"
+    isPlayerDead
+      ? ["返回首页", "新的开始", "读取进度"]
+      : result === "victory"
       ? ["搜查战场", "安抚路人", "继续上路"]
       : result === "fled"
         ? ["先疗伤", "回头观察", "继续赶路"]
-        : ["疗伤", "整理思绪", "查看卷册"];
+        : ["疗伤", "整理思绪", "打开更多"];
+  const endingMessage = isPlayerDead ? "胜败乃兵家常事，大侠请重新来过。" : null;
 
   const event: EventRecord = {
     id: makeId("evt"),
@@ -329,7 +337,7 @@ const finalizeCombat = (
     sceneType: "combat",
     title: `战斗结算：${combat.title}`,
     narrative: combat.introNarrative,
-    outcome: `${summary} ${loot.summary} ${summarizeCombatLogs(combat.logs)}`.trim(),
+    outcome: [summary, endingMessage, loot.summary, summarizeCombatLogs(combat.logs)].filter(Boolean).join(" "),
     deltas: {
       hp: player.hp - save.player.stats.hp,
       mp: player.mp - save.player.stats.mp,
@@ -340,7 +348,7 @@ const finalizeCombat = (
   updated = {
     ...updated,
     updatedAt: new Date().toISOString(),
-    gameMode: "dialogue",
+    gameMode: isPlayerDead ? "gameover" : "dialogue",
     combatState: null,
     inventory: [...updated.inventory, ...loot.items],
     player: {
@@ -361,6 +369,40 @@ const finalizeCombat = (
 
 export const makeId = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+
+/**
+ * Computes how many offline training attempts remain before the player must
+ * advance the story again, using the latest consecutive training events.
+ */
+export const getOfflineTrainingStatus = (slot: SaveSlot) => {
+  const currentTrainingWindow = [];
+
+  for (const event of slot.recentEvents) {
+    if (event.sceneType === "training") {
+      currentTrainingWindow.push(event);
+      continue;
+    }
+    if (event.sceneType === "system") {
+      continue;
+    }
+    if (event.sceneType === "dialogue" || event.sceneType === "combat" || event.sceneType === "rest") {
+      break;
+    }
+  }
+
+  const usedActionLabels = new Set(
+    currentTrainingWindow
+      .map((event) => event.title.replace(/^离线修行：/, "").trim())
+      .filter(Boolean),
+  );
+
+  return {
+    remainingUses: Math.max(0, MAX_CONSECUTIVE_TRAINING - currentTrainingWindow.length),
+    usedActionLabels,
+    totalTrainingEvents: slot.recentEvents.filter((event) => event.sceneType === "training").length,
+    needsStoryAdvance: currentTrainingWindow.length >= MAX_CONSECUTIVE_TRAINING,
+  };
+};
 
 export const getSectById = (sectId: string) =>
   sects.find((sect) => sect.id === sectId) ?? sects[0];

@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import keyboard02 from "@/assets/keyboard02.ogg";
+import { GamePanelContent, type GamePanelKey } from "@/components/game/GamePanels";
+import { ModelSettingsForm } from "@/components/game/ModelSettingsForm";
 import { AppFrame } from "@/components/layout/AppFrame";
 import { SectionCard } from "@/components/ui/SectionCard";
+import { ModalFrame } from "@/components/ui/ModalFrame";
 import { trainingActions } from "@/data/game-data";
+import { gameMenuItems } from "@/data/game-menu";
+import { getOfflineTrainingStatus } from "@/features/game/engine";
 import { formatDateTime, formatDelta } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/useAppStore";
@@ -10,6 +16,7 @@ import type { CombatRoundLog } from "@/types/game";
 
 const TYPEWRITER_INTERVAL_MS = 18;
 const COMBAT_LOG_REVEAL_INTERVAL_MS = 480;
+const AUDIO_TICK_INTERVAL_MS = 65;
 
 const groupCombatLogs = (logs: CombatRoundLog[]) => {
   const rounds = new Map<number, CombatRoundLog[]>();
@@ -56,14 +63,26 @@ export default function Game() {
   const [revealedCombatLogCount, setRevealedCombatLogCount] = useState(0);
   const [isCombatAnimating, setIsCombatAnimating] = useState(false);
   const [combatBeatText, setCombatBeatText] = useState("等待你的指令");
+  const [activeModal, setActiveModal] = useState<GamePanelKey | "model-settings" | null>(null);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const lastAudioAtRef = useRef(0);
+  const lastTypedLengthRef = useRef(0);
+  const storyScrollRef = useRef<HTMLDivElement | null>(null);
   const revealTimerRef = useRef<number | null>(null);
   const revealedLogCountRef = useRef(0);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   const configReady =
     Boolean(llmConfig?.lastValidatedAt) && validation.status === "success";
 
   const canProgress = Boolean(
-    isOnline && configReady && activeSave && input.trim().length > 0 && !isGenerating,
+    isOnline &&
+      configReady &&
+      activeSave &&
+      activeSave.gameMode === "dialogue" &&
+      input.trim().length > 0 &&
+      !isGenerating,
   );
 
   const latest = activeSave?.recentEvents[0];
@@ -93,6 +112,64 @@ export default function Game() {
   );
   const combatRounds = useMemo(() => groupCombatLogs(visibleCombatLogs), [visibleCombatLogs]);
   const combatActionLocked = isCombatAnimating || isGenerating;
+  const trainingStatus = activeSave ? getOfflineTrainingStatus(activeSave) : null;
+  const activeMenuItem = useMemo(
+    () => gameMenuItems.find((item) => item.id === activeModal),
+    [activeModal],
+  );
+
+  /**
+   * Creates the low-volume typing sound used during streamed narration.
+   */
+  useEffect(() => {
+    const audio = new Audio(keyboard02);
+    audio.preload = "auto";
+    audio.volume = 0.18;
+    audioRef.current = audio;
+
+    return () => {
+      audio.pause();
+      audioRef.current = null;
+    };
+  }, []);
+
+  /**
+   * Closes the in-game menu when the player clicks outside of it or presses Escape.
+   */
+  useEffect(() => {
+    if (!isMenuOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setIsMenuOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsMenuOpen(false);
+      }
+    };
+
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isMenuOpen]);
+
+  /**
+   * Closes the small menu whenever a full modal takes over the screen.
+   */
+  useEffect(() => {
+    if (activeModal) {
+      setIsMenuOpen(false);
+    }
+  }, [activeModal]);
 
   useEffect(() => {
     if (!combat || livingEnemies.length === 0) {
@@ -187,6 +264,7 @@ export default function Game() {
   useEffect(() => {
     if (!isGenerating) {
       setTypedPreview("");
+      lastTypedLengthRef.current = 0;
       return;
     }
 
@@ -212,17 +290,171 @@ export default function Game() {
     return () => window.clearTimeout(timer);
   }, [isGenerating, streamingPreview, typedPreview]);
 
+  /**
+   * Plays a subtle keyboard tick while the typewriter effect is revealing text.
+   */
+  useEffect(() => {
+    if (!isGenerating || !audioRef.current) {
+      return;
+    }
+
+    if (typedPreview.length <= lastTypedLengthRef.current) {
+      lastTypedLengthRef.current = typedPreview.length;
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastAudioAtRef.current < AUDIO_TICK_INTERVAL_MS) {
+      lastTypedLengthRef.current = typedPreview.length;
+      return;
+    }
+
+    lastAudioAtRef.current = now;
+    lastTypedLengthRef.current = typedPreview.length;
+
+    const audio = audioRef.current;
+    audio.currentTime = 0;
+    void audio.play().catch(() => {});
+  }, [isGenerating, typedPreview]);
+
+  /**
+   * Warms up the typing audio during a user gesture to reduce autoplay blocking.
+   */
+  const primeTypingAudio = () => {
+    if (!audioRef.current) {
+      return;
+    }
+
+    const audio = audioRef.current;
+    audio.muted = true;
+    audio.currentTime = 0;
+    void audio.play()
+      .then(() => {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.muted = false;
+      })
+      .catch(() => {
+        audio.muted = false;
+      });
+  };
+
+  /**
+   * Moves the player back to the top of the current scene before streaming starts.
+   */
+  const scrollStoryToTop = () => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    storyScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  /**
+   * Submits the current dialogue input and prepares the viewport for streamed output.
+   */
+  const submitProgress = async () => {
+    const current = input.trim();
+    if (!current || !canProgress) {
+      return;
+    }
+    primeTypingAudio();
+    scrollStoryToTop();
+    setInput("");
+    await progressStory(current);
+  };
+
+  /**
+   * Appends a quick note from the shared input area.
+   */
+  const submitNote = async () => {
+    const current = input.trim();
+    if (!current) {
+      return;
+    }
+    setInput("");
+    await appendNote(current);
+  };
+
+  /**
+   * Sends the current input with Shift/Cmd/Ctrl + Enter for faster keyboard play.
+   */
+  const handleInputKeyDown = async (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    if (!(event.shiftKey || event.metaKey || event.ctrlKey)) {
+      return;
+    }
+    event.preventDefault();
+    await submitProgress();
+  };
+
   return (
     <AppFrame
-      title="行旅之中"
+      title="当前剧情"
       subtitle={
         activeSave
           ? `${activeSave.player.location} · ${activeSave.player.title} · 等级 ${activeSave.player.stats.level}`
-          : "尚无存档，请先开启新局。"
+          : "尚无存档，请先开始新游戏。"
       }
       actions={
         activeSave ? (
           <div className="flex flex-wrap items-center justify-end gap-2">
+            <div ref={menuRef} className="relative">
+              <button
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={isMenuOpen}
+                onClick={() => setIsMenuOpen((current) => !current)}
+                className={cn(
+                  "flex items-center gap-2 rounded-[18px] px-4 py-2 text-sm transition",
+                  isMenuOpen
+                    ? "bg-amber-400/15 text-amber-100"
+                    : "bg-white/5 text-stone-100 hover:bg-white/10",
+                )}
+              >
+                <span>菜单</span>
+                <span
+                  className={cn(
+                    "text-[10px] text-stone-500 transition",
+                    isMenuOpen ? "rotate-180 text-amber-100/80" : "",
+                  )}
+                >
+                  v
+                </span>
+              </button>
+              {isMenuOpen ? (
+                <div className="absolute right-0 top-[calc(100%+0.6rem)] z-20 w-72 overflow-hidden rounded-[24px] border border-amber-300/15 bg-stone-950/96 shadow-[0_24px_80px_rgba(0,0,0,0.48)] backdrop-blur-xl">
+                  <div className="border-b border-white/10 px-4 py-3">
+                    <p className="text-[11px] uppercase tracking-[0.28em] text-amber-300/70">
+                      游戏菜单
+                    </p>
+                    <p className="mt-1 text-sm text-stone-300">人物、背包、日志、存档都从这里打开。</p>
+                  </div>
+                  <div className="grid gap-1 p-2">
+                    {gameMenuItems.map((item, index) => (
+                      <button
+                        type="button"
+                        key={item.id}
+                        onClick={() => {
+                          setIsMenuOpen(false);
+                          setActiveModal(item.id);
+                        }}
+                        className="flex w-full items-start gap-3 rounded-[18px] px-3 py-3 text-left transition hover:bg-white/5"
+                      >
+                        <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/5 text-[11px] text-stone-400">
+                          0{index + 1}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-sm text-stone-100">{item.label}</span>
+                          <span className="mt-1 block text-[11px] leading-5 text-stone-500">
+                            {item.description}
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
             <button
               type="button"
               onClick={() => setDebugMode(!debugMode)}
@@ -245,16 +477,76 @@ export default function Game() {
           </div>
         ) : (
           <Link
-            to="/new-game"
+            to="/"
             className="rounded-[18px] bg-amber-400/15 px-4 py-2 text-sm text-amber-100 transition hover:bg-amber-400/25"
           >
-            去开新局
+            回首页开始新游戏
           </Link>
         )
       }
     >
       {activeSave ? (
-        activeSave.gameMode === "combat" && combat ? (
+        activeSave.gameMode === "gameover" ? (
+          <div className="mx-auto grid min-h-[calc(100vh-18rem)] max-w-4xl place-items-center">
+            <SectionCard
+              eyebrow="终局"
+              title="游戏结束"
+              className="relative w-full overflow-hidden border-rose-300/15 bg-[radial-gradient(circle_at_top,_rgba(190,24,93,0.16),_transparent_36%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))] p-0 shadow-[0_30px_100px_rgba(0,0,0,0.52)]"
+            >
+              <div className="absolute inset-x-0 top-0 h-40 bg-[linear-gradient(180deg,rgba(244,63,94,0.18),transparent)]" />
+              <div className="absolute right-[-4rem] top-10 h-40 w-40 rounded-full bg-rose-500/10 blur-3xl" />
+              <div className="absolute left-[-3rem] bottom-0 h-32 w-32 rounded-full bg-amber-400/10 blur-3xl" />
+
+              <div className="relative grid gap-6 px-6 py-8 sm:px-8 sm:py-10">
+                <div className="space-y-3 border-b border-white/10 pb-6">
+                  <p className="text-[11px] uppercase tracking-[0.38em] text-rose-200/70">Battle Lost</p>
+                  <h3 className="font-serif text-[32px] leading-tight text-stone-50 sm:text-[40px]">
+                    胜败乃兵家常事
+                  </h3>
+                  <p className="max-w-2xl text-base leading-8 text-stone-300">
+                    大侠请重新来过。你在这一战中力竭倒下，这段江湖路暂时走到了尽头，
+                    但江湖从不只认一场胜负。
+                  </p>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+                  <div className="rounded-[24px] border border-white/10 bg-black/25 p-5">
+                    <p className="text-[11px] uppercase tracking-[0.26em] text-stone-500">最后记录</p>
+                    <p className="mt-3 text-base text-stone-100">{latest?.title ?? "战斗结算"}</p>
+                    <p className="mt-4 whitespace-pre-wrap text-sm leading-7 text-stone-400">
+                      {latest?.outcome ?? "这场恶战已经划下句点。"}
+                    </p>
+                  </div>
+
+                  <div className="grid gap-3">
+                    <div className="rounded-[24px] border border-rose-300/15 bg-rose-400/8 p-5">
+                      <p className="text-[11px] uppercase tracking-[0.26em] text-rose-200/70">败北提示</p>
+                      <p className="mt-3 text-sm leading-7 text-stone-300">
+                        你可以回到首页直接开启新局，或读取之前保留下来的稳定进度，再次挑战这一关。
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 rounded-[24px] border border-white/10 bg-white/5 p-4">
+                      <Link
+                        to="/"
+                        className="rounded-[18px] bg-amber-400/18 px-4 py-3 text-center text-sm text-amber-50 transition hover:bg-amber-400/28"
+                      >
+                        返回首页，重新开始
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => setActiveModal("saves")}
+                        className="rounded-[18px] bg-white/5 px-4 py-3 text-sm text-stone-100 transition hover:bg-white/10"
+                      >
+                        读取之前的进度
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </SectionCard>
+          </div>
+        ) : activeSave.gameMode === "combat" && combat ? (
           <div className="grid gap-3 xl:min-h-[calc(100vh-13rem)] xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)] xl:items-start">
             <div className="grid gap-3">
               <SectionCard eyebrow="交战模式" title={`${combat.title} · 第 ${combat.round} 回合`}>
@@ -567,7 +859,7 @@ export default function Game() {
                 </div>
               </SectionCard>
 
-              <SectionCard eyebrow="卷册" title="最近记录">
+              <SectionCard eyebrow="记录" title="最近记录">
                 <div className="space-y-3">
                   {visibleEvents.map((event) => (
                     <div key={event.id} className="rounded-[18px] border border-white/10 bg-white/5 px-4 py-3">
@@ -581,10 +873,14 @@ export default function Game() {
                     </div>
                   ))}
                   <Link
-                    to="/codex"
+                    to="#"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      setActiveModal("logs");
+                    }}
                     className="block rounded-[18px] bg-white/5 px-4 py-3 text-center text-xs text-stone-300 transition hover:bg-white/10"
                   >
-                    打开卷册查看全部
+                    打开日志查看全部
                   </Link>
                 </div>
               </SectionCard>
@@ -599,7 +895,10 @@ export default function Game() {
                 className="xl:flex xl:min-h-0 xl:flex-col xl:overflow-hidden"
               >
                 <div className="space-y-3 xl:flex xl:min-h-0 xl:flex-1 xl:flex-col xl:space-y-0">
-                  <div className="whitespace-pre-wrap text-sm leading-6 text-stone-200 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-2 xl:leading-5">
+                  <div
+                    ref={storyScrollRef}
+                    className="whitespace-pre-wrap text-sm leading-6 text-stone-200 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-2 xl:leading-5"
+                  >
                     {echoNarrative}
                     {isGenerating ? (
                       <span className="ml-1 inline-block h-4 w-[2px] translate-y-[2px] animate-pulse rounded-full bg-amber-200/80 align-middle" />
@@ -681,6 +980,7 @@ export default function Game() {
                     <textarea
                       value={input}
                       onChange={(event) => setInput(event.target.value)}
+                      onKeyDown={handleInputKeyDown}
                       placeholder="输入你的行动或对白…"
                       rows={3}
                       className="w-full resize-none rounded-[20px] border border-white/10 bg-black/30 px-4 py-3 text-sm text-stone-100 outline-none placeholder:text-stone-600 focus:border-amber-300/40"
@@ -701,16 +1001,14 @@ export default function Game() {
                         测试通过。
                       </p>
                     ) : null}
+                    <p className="text-[11px] text-stone-500">
+                      快捷发送：`Shift + Enter` / `Command + Enter` / `Control + Enter`
+                    </p>
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
                         disabled={!canProgress}
-                        onClick={async () => {
-                          const current = input.trim();
-                          if (!current) return;
-                          setInput("");
-                          await progressStory(current);
-                        }}
+                        onClick={submitProgress}
                         className={cn(
                           "rounded-[18px] px-4 py-2 text-sm transition",
                           canProgress
@@ -722,12 +1020,7 @@ export default function Game() {
                       </button>
                       <button
                         type="button"
-                        onClick={async () => {
-                          const current = input.trim();
-                          if (!current) return;
-                          setInput("");
-                          await appendNote(current);
-                        }}
+                        onClick={submitNote}
                         className="rounded-[18px] bg-white/5 px-4 py-2 text-sm text-stone-100 transition hover:bg-white/10"
                       >
                         随手记
@@ -873,23 +1166,47 @@ export default function Game() {
               ) : null}
 
               <SectionCard eyebrow="离线" title="本地修行">
-                <div className="grid gap-2 sm:grid-cols-2">
+                <div className="space-y-3">
+                  <div className="rounded-[18px] border border-amber-300/20 bg-amber-300/5 px-4 py-3 text-xs leading-5 text-amber-100/85">
+                    <p>
+                      本幕剩余修行次数：{trainingStatus?.remainingUses ?? 0}/2
+                    </p>
+                    <p className="mt-1 text-amber-100/65">
+                      每推进一幕前最多修行 2 次，且同一招式只能使用 1 次，避免无限刷经验。
+                    </p>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
                   {trainingActions.map((action) => (
+                    (() => {
+                      const isUsed = trainingStatus?.usedActionLabels.has(action.label) ?? false;
+                      const isLocked = trainingStatus?.needsStoryAdvance ?? false;
+                      const disabled = isUsed || isLocked;
+                      const badgeText = isLocked ? "需推进剧情" : isUsed ? "本幕已用" : `EXP ${formatDelta(action.deltas.exp)}`;
+                      return (
                     <button
                       type="button"
                       key={action.id}
+                      disabled={disabled}
                       onClick={() => applyOfflineTraining(action.id)}
-                      className="flex items-start justify-between gap-3 rounded-[18px] border border-white/10 bg-white/5 px-4 py-3 text-left transition hover:bg-white/10"
+                      className={cn(
+                        "flex items-start justify-between gap-3 rounded-[18px] border px-4 py-3 text-left transition",
+                        disabled
+                          ? "border-white/10 bg-white/5 text-stone-500"
+                          : "border-white/10 bg-white/5 hover:bg-white/10",
+                      )}
                     >
                       <div>
                         <p className="text-sm text-stone-100">{action.label}</p>
                         <p className="mt-1 text-xs text-stone-500">{action.description}</p>
                       </div>
                       <span className="shrink-0 text-[11px] text-stone-500">
-                        EXP {formatDelta(action.deltas.exp)}
+                        {badgeText}
                       </span>
                     </button>
+                      );
+                    })()
                   ))}
+                  </div>
                 </div>
               </SectionCard>
 
@@ -907,10 +1224,14 @@ export default function Game() {
                     </div>
                   ))}
                   <Link
-                    to="/codex"
+                    to="#"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      setActiveModal("logs");
+                    }}
                     className="block rounded-[18px] bg-white/5 px-4 py-3 text-center text-xs text-stone-300 transition hover:bg-white/10"
                   >
-                    打开卷册查看全部
+                    打开日志查看全部
                   </Link>
                 </div>
               </SectionCard>
@@ -927,11 +1248,35 @@ export default function Game() {
               to="/new-game"
               className="inline-flex w-fit rounded-[18px] bg-amber-400/15 px-4 py-2 text-sm text-amber-100 transition hover:bg-amber-400/25"
             >
-              去开启新局
+              去开始新游戏
             </Link>
           </div>
         </SectionCard>
       )}
+      {activeMenuItem ? (
+        <ModalFrame
+          title={activeMenuItem.label}
+          description={activeMenuItem.description}
+          onClose={() => setActiveModal(null)}
+          widthClassName={activeMenuItem.id === "logs" ? "max-w-6xl" : "max-w-5xl"}
+        >
+          <GamePanelContent
+            panel={activeMenuItem.id}
+            onLoaded={() => setActiveModal(null)}
+            onOpenModelSettings={() => setActiveModal("model-settings")}
+          />
+        </ModalFrame>
+      ) : null}
+      {activeModal === "model-settings" ? (
+        <ModalFrame
+          title="模型设置"
+          description="配置 endpoint、model_id、api_key，并测试当前模型连接。"
+          onClose={() => setActiveModal(null)}
+          widthClassName="max-w-6xl"
+        >
+          <ModelSettingsForm />
+        </ModalFrame>
+      ) : null}
     </AppFrame>
   );
 }

@@ -1,10 +1,7 @@
 import { useEffect } from "react";
 import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
 import Home from "@/pages/Home";
-import NewGame from "@/pages/NewGame";
 import Game from "@/pages/Game";
-import Codex from "@/pages/Codex";
-import LlmConfig from "@/pages/LlmConfig";
 import { useAppStore } from "@/store/useAppStore";
 
 export default function App() {
@@ -33,10 +30,12 @@ export default function App() {
     <Router>
       <Routes>
         <Route path="/" element={<Home />} />
-        <Route path="/new-game" element={<NewGame />} />
         <Route path="/game" element={<Game />} />
-        <Route path="/codex" element={<Codex />} />
-        <Route path="/llm-config" element={<LlmConfig />} />
+        <Route path="/new-game" element={<Navigate to="/" replace />} />
+        <Route path="/game/menu" element={<Navigate to="/game" replace />} />
+        <Route path="/game/menu/:panel" element={<Navigate to="/game" replace />} />
+        <Route path="/codex" element={<Navigate to="/game" replace />} />
+        <Route path="/llm-config" element={<Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Router>

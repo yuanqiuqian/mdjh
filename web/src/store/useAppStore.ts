@@ -5,6 +5,7 @@ import {
   beginCombat,
   buildCombatFollowupPrompt,
   createNewSave,
+  getOfflineTrainingStatus,
   makeId,
   resolveCombatAction,
 } from "@/features/game/engine";
@@ -56,8 +57,6 @@ type AppState = {
   lastStoryError: string | null;
   saveEntries: SaveEntry[];
   activeSave: SaveSlot | null;
-  currentPanel: "overview" | "character" | "inventory" | "relations" | "logs";
-  setCurrentPanel: (panel: AppState["currentPanel"]) => void;
   setOnline: (isOnline: boolean) => void;
   setDebugMode: (enabled: boolean) => void;
   hydrate: () => Promise<void>;
@@ -139,8 +138,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   lastStoryError: null,
   saveEntries: createInitialEntries(),
   activeSave: null,
-  currentPanel: "overview",
-  setCurrentPanel: (panel) => set({ currentPanel: panel }),
   setOnline: (isOnline) => set({ isOnline }),
   setDebugMode: (debugMode) => set({ debugMode }),
   hydrate: async () => {
@@ -202,7 +199,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       activeSave: save,
       saveEntries: nextEntries,
-      currentPanel: "overview",
       currentStoryRequest: null,
       lastStoryDebug: null,
       lastStoryError: null,
@@ -215,6 +211,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     const action = trainingActions.find((item) => item.id === actionId);
     if (!action) {
+      return;
+    }
+    const trainingStatus = getOfflineTrainingStatus(state.activeSave);
+    if (trainingStatus.needsStoryAdvance) {
+      set({
+        lastStoryError: "本地修行已达本幕上限。请先推进剧情，再决定是否继续闭关。",
+      });
+      return;
+    }
+    if (trainingStatus.usedActionLabels.has(action.label)) {
+      set({
+        lastStoryError: `本幕中已经进行过一次“${action.label}”。请换一种修行，或先推进剧情。`,
+      });
       return;
     }
     const { updated } = applyTraining(state.activeSave, action);
@@ -247,7 +256,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       sceneType: "system" as const,
       title: "随手记",
       narrative: trimmed,
-      outcome: "这段记忆被你收进卷册。",
+      outcome: "这段记忆已写入当前存档记录。",
     };
     const updated: SaveSlot = {
       ...state.activeSave,
@@ -269,7 +278,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     const trimmed = input.trim();
     const configReady =
       Boolean(state.llmConfig?.lastValidatedAt) && state.validation.status === "success";
-    if (!trimmed || !state.activeSave || !state.llmConfig || !configReady) {
+    if (
+      !trimmed ||
+      !state.activeSave ||
+      state.activeSave.gameMode !== "dialogue" ||
+      !state.llmConfig ||
+      !configReady
+    ) {
       return;
     }
 
@@ -381,7 +396,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     const configReady =
       Boolean(state.llmConfig?.lastValidatedAt) && state.validation.status === "success";
 
-    if (resolution.finished && resolution.result && state.llmConfig && state.isOnline && configReady) {
+    if (
+      resolution.finished &&
+      resolution.result &&
+      resolution.result !== "defeat" &&
+      state.llmConfig &&
+      state.isOnline &&
+      configReady
+    ) {
       const followupPrompt = buildCombatFollowupPrompt(updatedSave, resolution.result);
       set({
         isGenerating: true,

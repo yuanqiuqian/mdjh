@@ -1,15 +1,24 @@
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { AppFrame } from "@/components/layout/AppFrame";
 import { SectionCard } from "@/components/ui/SectionCard";
+import { ModalFrame } from "@/components/ui/ModalFrame";
+import { NewGamePicker } from "@/components/game/NewGamePicker";
+import { SaveSlotsPanel } from "@/components/game/GamePanels";
+import { ModelSettingsForm } from "@/components/game/ModelSettingsForm";
 import { formatDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/useAppStore";
+import { useState } from "react";
+
+type HomeModalKey = "new-game" | "load-game" | "model-settings" | null;
 
 export default function Home() {
+  const navigate = useNavigate();
   const activeSave = useAppStore((state) => state.activeSave);
   const llmConfig = useAppStore((state) => state.llmConfig);
   const validation = useAppStore((state) => state.validation);
   const isOnline = useAppStore((state) => state.isOnline);
+  const [activeModal, setActiveModal] = useState<HomeModalKey>(null);
 
   const configReady =
     Boolean(llmConfig?.lastValidatedAt) && validation.status === "success";
@@ -17,99 +26,125 @@ export default function Home() {
   return (
     <AppFrame
       title="山门前"
-      subtitle="你可以先整理行囊、配置模型、开一局新档，或在离线状态下进行本地修行与回放。"
+      subtitle="从这里开始新的故事、读取已有进度，或先把模型接入准备好。"
     >
-      <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-        <SectionCard eyebrow="当前进度" title="最近的江湖脚步">
-          {activeSave ? (
-            <div className="space-y-4">
-              <div className="flex flex-wrap items-start justify-between gap-4">
+      <div className="grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
+        <SectionCard eyebrow="主菜单" title="开始游戏">
+          <div className="grid gap-3">
+            <a
+              href="#"
+              onClick={(event) => {
+                event.preventDefault();
+                setActiveModal("new-game");
+              }}
+              className="rounded-[22px] border border-amber-300/20 bg-amber-400/10 px-5 py-4 text-left transition hover:bg-amber-400/18"
+            >
+              <p className="text-base text-amber-100">新的开始</p>
+              <p className="mt-1 text-xs text-amber-100/65">选择门派，直接进入开局剧情。</p>
+            </a>
+            <a
+              href="#"
+              onClick={(event) => {
+                event.preventDefault();
+                setActiveModal("load-game");
+              }}
+              className="rounded-[22px] border border-white/10 bg-white/5 px-5 py-4 text-left transition hover:bg-white/10"
+            >
+              <p className="text-base text-stone-100">读取进度</p>
+              <p className="mt-1 text-xs text-stone-500">
+                {activeSave
+                  ? `当前进度：${activeSave.player.title} · ${formatDateTime(activeSave.updatedAt)}`
+                  : "查看存档位并读取已有游戏进度。"}
+              </p>
+            </a>
+            <a
+              href="#"
+              onClick={(event) => {
+                event.preventDefault();
+                setActiveModal("model-settings");
+              }}
+              className="rounded-[22px] border border-white/10 bg-white/5 px-5 py-4 text-left transition hover:bg-white/10"
+            >
+              <p className="text-base text-stone-100">模型设置</p>
+              <p className="mt-1 text-xs text-stone-500">配置 endpoint、model_id、api_key 并测试连接。</p>
+            </a>
+          </div>
+        </SectionCard>
+
+        <div className="grid gap-4">
+          <SectionCard eyebrow="最近进度" title={activeSave ? "上次停留" : "尚未创建进度"}>
+            {activeSave ? (
+              <div className="space-y-4">
                 <div>
                   <p className="text-sm text-stone-200">
                     {activeSave.player.title} · {activeSave.player.name}
                   </p>
-                  <p className="text-xs text-stone-500">
-                    {activeSave.player.location} · 最后更新{" "}
-                    {formatDateTime(activeSave.updatedAt)}
+                  <p className="mt-1 text-xs text-stone-500">
+                    {activeSave.player.location} · 最近更新 {formatDateTime(activeSave.updatedAt)}
                   </p>
                 </div>
-                <Link
-                  to="/game"
-                  className="rounded-[18px] bg-amber-400/15 px-4 py-2 text-sm text-amber-100 transition hover:bg-amber-400/25"
+                <div className="grid gap-3 rounded-[22px] border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-center justify-between text-xs text-stone-400">
+                    <span>HP</span>
+                    <span className="text-stone-200">
+                      {activeSave.player.stats.hp}/{activeSave.player.stats.hpMax}
+                    </span>
+                  </div>
+                  <div className="h-2 rounded-full bg-white/5">
+                    <div
+                      className="h-2 rounded-full bg-gradient-to-r from-rose-500/70 to-amber-400/70"
+                      style={{
+                        width: `${(activeSave.player.stats.hp / activeSave.player.stats.hpMax) * 100}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-stone-400">
+                    <span>MP</span>
+                    <span className="text-stone-200">
+                      {activeSave.player.stats.mp}/{activeSave.player.stats.mpMax}
+                    </span>
+                  </div>
+                  <div className="h-2 rounded-full bg-white/5">
+                    <div
+                      className="h-2 rounded-full bg-gradient-to-r from-cyan-500/60 to-amber-300/60"
+                      style={{
+                        width: `${(activeSave.player.stats.mp / activeSave.player.stats.mpMax) * 100}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="grid gap-2 text-xs leading-5 text-stone-400">
+                  <p>最近事件：{activeSave.recentEvents[0]?.title ?? "尚未记录"}</p>
+                  <p>建议动作：{activeSave.suggestedActions.join(" · ")}</p>
+                </div>
+                <a
+                  href="#"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    navigate("/game");
+                  }}
+                  className="inline-flex w-fit rounded-[18px] bg-white/5 px-4 py-2 text-sm text-stone-100 transition hover:bg-white/10"
                 >
-                  继续行旅
-                </Link>
+                  直接进入当前剧情
+                </a>
               </div>
-              <div className="grid gap-3 rounded-[22px] border border-white/10 bg-white/5 p-4">
-                <div className="flex items-center justify-between text-xs text-stone-400">
-                  <span>HP</span>
-                  <span className="text-stone-200">
-                    {activeSave.player.stats.hp}/{activeSave.player.stats.hpMax}
-                  </span>
-                </div>
-                <div className="h-2 rounded-full bg-white/5">
-                  <div
-                    className="h-2 rounded-full bg-gradient-to-r from-rose-500/70 to-amber-400/70"
-                    style={{
-                      width: `${
-                        (activeSave.player.stats.hp /
-                          activeSave.player.stats.hpMax) *
-                        100
-                      }%`,
-                    }}
-                  />
-                </div>
-                <div className="flex items-center justify-between text-xs text-stone-400">
-                  <span>MP</span>
-                  <span className="text-stone-200">
-                    {activeSave.player.stats.mp}/{activeSave.player.stats.mpMax}
-                  </span>
-                </div>
-                <div className="h-2 rounded-full bg-white/5">
-                  <div
-                    className="h-2 rounded-full bg-gradient-to-r from-cyan-500/60 to-amber-300/60"
-                    style={{
-                      width: `${
-                        (activeSave.player.stats.mp /
-                          activeSave.player.stats.mpMax) *
-                        100
-                      }%`,
-                    }}
-                  />
-                </div>
+            ) : (
+              <div className="space-y-3 text-sm text-stone-400">
+                <p>你还没有创建进度。先点“新的开始”，再从山门踏进江湖。</p>
+                <p className="text-xs text-stone-500">
+                  模型状态：{configReady ? "已就绪" : "未验证"} · {isOnline ? "在线" : "离线"}
+                </p>
               </div>
-              <div className="grid gap-2 text-xs leading-5 text-stone-400">
-                <p>最近事件：{activeSave.recentEvents[0]?.title ?? "尚未记录"}</p>
-                <p>建议动作：{activeSave.suggestedActions.join(" · ")}</p>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <p className="text-sm text-stone-400">
-                你还没有创建存档。选择门派、落下一次誓言，从山门一步踏入江湖。
-              </p>
-              <Link
-                to="/new-game"
-                className="inline-flex w-fit rounded-[18px] bg-amber-400/15 px-4 py-2 text-sm text-amber-100 transition hover:bg-amber-400/25"
-              >
-                开启新局
-              </Link>
-            </div>
-          )}
-        </SectionCard>
+            )}
+          </SectionCard>
 
-        <div className="grid gap-4">
-          <SectionCard eyebrow="连接状态" title="江湖的风向">
+          <SectionCard eyebrow="当前状态" title="连接与模型">
             <div className="space-y-4">
               <div className="flex items-center justify-between rounded-[20px] border border-white/10 bg-white/5 px-4 py-3">
                 <div className="space-y-1">
-                  <p className="text-sm text-stone-200">
-                    {isOnline ? "在线" : "离线"}
-                  </p>
+                  <p className="text-sm text-stone-200">{isOnline ? "在线" : "离线"}</p>
                   <p className="text-xs text-stone-500">
-                    {isOnline
-                      ? "可测试模型配置；剧情推进将按 OpenAI 兼容协议请求。"
-                      : "离线时只能本地修行与查看存档。"}
+                    {isOnline ? "可以测试模型并联网推进剧情。" : "当前只能使用本地功能与存档管理。"}
                   </p>
                 </div>
                 <span
@@ -119,51 +154,53 @@ export default function Home() {
                   )}
                 />
               </div>
-
               <div className="rounded-[20px] border border-white/10 bg-white/5 px-4 py-3">
-                <p className="text-sm text-stone-200">
-                  {configReady ? "模型已就绪" : "尚未验证模型"}
-                </p>
-                <p className="mt-1 text-xs text-stone-500">
-                  {configReady
-                    ? "验证通过后可在“行旅”页直接推进剧情。"
-                    : "未验证时会拦截联网剧情推进，但不会影响回放与离线修行。"}
-                </p>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <Link
-                    to="/llm-config"
-                    className="rounded-[16px] bg-white/5 px-3 py-1.5 text-xs text-stone-100 transition hover:bg-white/10"
-                  >
-                    前往配置
-                  </Link>
-                  {validation.message ? (
-                    <span className="text-xs text-stone-500">{validation.message}</span>
-                  ) : null}
-                </div>
+                <p className="text-sm text-stone-200">{configReady ? "模型已就绪" : "模型尚未验证"}</p>
+                <p className="mt-1 text-xs text-stone-500">{validation.message}</p>
               </div>
-            </div>
-          </SectionCard>
-
-          <SectionCard eyebrow="卷册入口" title="整理行囊">
-            <div className="grid gap-2 text-sm text-stone-300">
-              <Link
-                to="/codex"
-                className="flex items-center justify-between rounded-[18px] border border-white/10 bg-white/5 px-4 py-3 transition hover:bg-white/10"
-              >
-                <span>角色、关系、背包、存档与日志</span>
-                <span className="text-xs text-stone-500">进入</span>
-              </Link>
-              <Link
-                to="/game"
-                className="flex items-center justify-between rounded-[18px] border border-white/10 bg-white/5 px-4 py-3 transition hover:bg-white/10"
-              >
-                <span>直接打开游戏主界面</span>
-                <span className="text-xs text-stone-500">进入</span>
-              </Link>
             </div>
           </SectionCard>
         </div>
       </div>
+      {activeModal === "new-game" ? (
+        <ModalFrame
+          title="新的开始"
+          description="选择门派，立刻进入开局剧情。"
+          onClose={() => setActiveModal(null)}
+        >
+          <NewGamePicker
+            onCreated={() => {
+              setActiveModal(null);
+              navigate("/game");
+            }}
+          />
+        </ModalFrame>
+      ) : null}
+      {activeModal === "load-game" ? (
+        <ModalFrame
+          title="读取进度"
+          description="选择一个存档位，读取后直接进入当前剧情。"
+          onClose={() => setActiveModal(null)}
+          widthClassName="max-w-4xl"
+        >
+          <SaveSlotsPanel
+            onLoaded={() => {
+              setActiveModal(null);
+              navigate("/game");
+            }}
+          />
+        </ModalFrame>
+      ) : null}
+      {activeModal === "model-settings" ? (
+        <ModalFrame
+          title="模型设置"
+          description="填写 endpoint、model_id、api_key，并测试当前模型连接。"
+          onClose={() => setActiveModal(null)}
+          widthClassName="max-w-6xl"
+        >
+          <ModelSettingsForm />
+        </ModalFrame>
+      ) : null}
     </AppFrame>
   );
 }

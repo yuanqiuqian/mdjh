@@ -131,4 +131,52 @@ describe("game engine", () => {
     expect(prompt).toContain("我方获胜");
     expect(prompt).toContain("本次收获");
   });
+
+  it("switches to game over when the player dies in combat", () => {
+    const save = createNewSave("wudang");
+    const weakenedSave = {
+      ...save,
+      player: {
+        ...save.player,
+        stats: {
+          ...save.player.stats,
+          hp: 6,
+        },
+      },
+    };
+    const setup: CombatSetupResponse = {
+      title: "绝路血战",
+      objective: "活着杀出重围",
+      introNarrative: "敌人步步紧逼，不再给你喘息之机。",
+      canFlee: false,
+      allies: [],
+      enemies: [
+        {
+          id: "npc-assassin",
+          name: "黑衣刺客",
+          side: "enemy",
+          level: 4,
+          hp: 40,
+          hpMax: 40,
+          mp: 0,
+          mpMax: 0,
+          atk: 30,
+          arm: 0,
+          aspd: 1,
+          skills: [],
+          isBoss: true,
+        },
+      ],
+    };
+
+    const combatSave = beginCombat(weakenedSave, setup);
+    const resolved = resolveCombatAction(combatSave, {
+      type: "defend",
+    });
+
+    expect(resolved.result).toBe("defeat");
+    expect(resolved.updatedSave.gameMode).toBe("gameover");
+    expect(resolved.updatedSave.combatState).toBeNull();
+    expect(resolved.updatedSave.recentEvents[0]?.outcome).toContain("胜败乃兵家常事，大侠请重新来过。");
+  });
 });
