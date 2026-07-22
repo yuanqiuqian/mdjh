@@ -1,8 +1,17 @@
-import { useEffect } from "react";
+import { Suspense, lazy, useEffect } from "react";
 import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
-import Home from "@/pages/Home";
-import Game from "@/pages/Game";
 import { useAppStore } from "@/store/useAppStore";
+
+const Home = lazy(() => import("@/pages/Home"));
+const Game = lazy(() => import("@/pages/Game"));
+
+function RouteLoadingFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[#050505] px-6 text-sm text-stone-400">
+      场景加载中…
+    </div>
+  );
+}
 
 export default function App() {
   const isHydrated = useAppStore((state) => state.isHydrated);
@@ -28,16 +37,18 @@ export default function App() {
 
   return (
     <Router>
-      <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/game" element={<Game />} />
-        <Route path="/new-game" element={<Navigate to="/" replace />} />
-        <Route path="/game/menu" element={<Navigate to="/game" replace />} />
-        <Route path="/game/menu/:panel" element={<Navigate to="/game" replace />} />
-        <Route path="/codex" element={<Navigate to="/game" replace />} />
-        <Route path="/llm-config" element={<Navigate to="/" replace />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <Suspense fallback={<RouteLoadingFallback />}>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/game" element={<Game />} />
+          <Route path="/new-game" element={<Navigate to="/" replace />} />
+          <Route path="/game/menu" element={<Navigate to="/game" replace />} />
+          <Route path="/game/menu/:panel" element={<Navigate to="/game" replace />} />
+          <Route path="/codex" element={<Navigate to="/game" replace />} />
+          <Route path="/llm-config" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
     </Router>
   );
 }

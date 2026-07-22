@@ -1,16 +1,18 @@
+import { Suspense, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { LazyModelSettingsForm, LazyNewGamePicker, LazySaveSlotsPanel } from "@/components/game/lazy";
 import { AppFrame } from "@/components/layout/AppFrame";
 import { SectionCard } from "@/components/ui/SectionCard";
 import { ModalFrame } from "@/components/ui/ModalFrame";
-import { NewGamePicker } from "@/components/game/NewGamePicker";
-import { SaveSlotsPanel } from "@/components/game/GamePanels";
-import { ModelSettingsForm } from "@/components/game/ModelSettingsForm";
 import { formatDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/useAppStore";
-import { useState } from "react";
 
 type HomeModalKey = "new-game" | "load-game" | "model-settings" | null;
+
+function HomeModalLoadingFallback() {
+  return <p className="text-sm text-stone-400">内容加载中…</p>;
+}
 
 export default function Home() {
   const navigate = useNavigate();
@@ -168,12 +170,14 @@ export default function Home() {
           description="选择门派，立刻进入开局剧情。"
           onClose={() => setActiveModal(null)}
         >
-          <NewGamePicker
-            onCreated={() => {
-              setActiveModal(null);
-              navigate("/game");
-            }}
-          />
+          <Suspense fallback={<HomeModalLoadingFallback />}>
+            <LazyNewGamePicker
+              onCreated={() => {
+                setActiveModal(null);
+                navigate("/game");
+              }}
+            />
+          </Suspense>
         </ModalFrame>
       ) : null}
       {activeModal === "load-game" ? (
@@ -183,12 +187,14 @@ export default function Home() {
           onClose={() => setActiveModal(null)}
           widthClassName="max-w-4xl"
         >
-          <SaveSlotsPanel
-            onLoaded={() => {
-              setActiveModal(null);
-              navigate("/game");
-            }}
-          />
+          <Suspense fallback={<HomeModalLoadingFallback />}>
+            <LazySaveSlotsPanel
+              onLoaded={() => {
+                setActiveModal(null);
+                navigate("/game");
+              }}
+            />
+          </Suspense>
         </ModalFrame>
       ) : null}
       {activeModal === "model-settings" ? (
@@ -198,7 +204,9 @@ export default function Home() {
           onClose={() => setActiveModal(null)}
           widthClassName="max-w-6xl"
         >
-          <ModelSettingsForm />
+          <Suspense fallback={<HomeModalLoadingFallback />}>
+            <LazyModelSettingsForm />
+          </Suspense>
         </ModalFrame>
       ) : null}
     </AppFrame>

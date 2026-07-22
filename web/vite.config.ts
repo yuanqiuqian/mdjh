@@ -3,9 +3,42 @@ import react from '@vitejs/plugin-react'
 import tsconfigPaths from "vite-tsconfig-paths";
 import { VitePWA } from 'vite-plugin-pwa'
 
+const manualChunks = (id: string) => {
+  if (!id.includes("node_modules")) {
+    return undefined;
+  }
+
+  if (
+    id.includes("react-hook-form") ||
+    id.includes("@hookform/resolvers") ||
+    id.includes("/zod/")
+  ) {
+    return "form-vendor";
+  }
+
+  if (
+    id.includes("/react/") ||
+    id.includes("react-dom") ||
+    id.includes("react-router-dom")
+  ) {
+    return "react-vendor";
+  }
+
+  if (id.includes("zustand") || id.includes("/idb/")) {
+    return "data-vendor";
+  }
+
+  return undefined;
+};
+
 export default defineConfig({
   build: {
     sourcemap: 'hidden',
+    rollupOptions: {
+      output: {
+        manualChunks,
+      },
+    },
   },
   test: {
     environment: 'jsdom',
